@@ -95,6 +95,7 @@ dependencies = [
  "dirs",
  "image",
  "imagehash",
+ "rayon",
  "serde",
  "serde_json",
  "thiserror",

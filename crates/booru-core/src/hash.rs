@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use imagehash::{average_hash, difference_hash, perceptual_hash};
+use rayon::prelude::*;
 
 use crate::error::BooruError;
 use crate::scan::ImageItem;
@@ -60,28 +61,42 @@ pub fn compute_fuzzy_hash(path: &Path, algo: FuzzyHashAlgorithm) -> Result<Fuzzy
 }
 
 pub fn find_duplicates(items: &[ImageItem], algo: FuzzyHashAlgorithm, max_distance: u32) -> DuplicateReport {
+    let results: Vec<(usize, Result<FuzzyHash, BooruError>)> = items
+        .par_iter()
+        .enumerate()
+        .map(|(idx, item)| (idx, compute_fuzzy_hash(&item.image_path, algo)))
+        .collect();
+
     let mut warnings = Vec::new();
     let mut hashes = Vec::new();
-
-    for (idx, item) in items.iter().enumerate() {
-        match compute_fuzzy_hash(&item.image_path, algo) {
+    for (idx, result) in results {
+        match result {
             Ok(hash) => hashes.push((idx, hash)),
             Err(err) => warnings.push(DuplicateWarning {
-                path: item.image_path.clone(),
+                path: items[idx].image_path.clone(),
                 message: format!("{err}"),
             }),
         }
     }
 
     let mut uf = UnionFind::new(items.len());
-    for i in 0..hashes.len() {
-        for j in (i + 1)..hashes.len() {
-            let (idx_i, hash_i) = &hashes[i];
-            let (idx_j, hash_j) = &hashes[j];
-            if hash_i.distance(&hash_j) <= max_distance {
-                uf.union(*idx_i, *idx_j);
+    let pairs: Vec<(usize, usize)> = (0..hashes.len())
+        .into_par_iter()
+        .flat_map(|i| {
+            let mut local = Vec::new();
+            for j in (i + 1)..hashes.len() {
+                let (idx_i, hash_i) = &hashes[i];
+                let (idx_j, hash_j) = &hashes[j];
+                if hash_i.distance(hash_j) <= max_distance {
+                    local.push((*idx_i, *idx_j));
+                }
             }
-        }
+            local
+        })
+        .collect();
+
+    for (a, b) in pairs {
+        uf.union(a, b);
     }
 
     let mut groups_map: HashMap<usize, Vec<usize>> = HashMap::new();

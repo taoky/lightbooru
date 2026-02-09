@@ -19,3 +19,4 @@ clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 dirs = "5"
 imagehash = "0.3.0"
+rayon = "1"
