@@ -263,8 +263,13 @@ pub fn compute_hashes_with_cache(
     HashComputation { hashes, warnings }
 }
 
-pub fn group_duplicates(hashes: &[(usize, FuzzyHash)], total_items: usize, max_distance: u32) -> Vec<DuplicateGroup> {
-    let mut uf = UnionFind::new(total_items);
+pub fn group_duplicates(
+    items: &[ImageItem],
+    hashes: &[(usize, FuzzyHash)],
+    max_distance: u32,
+    skip_same_dir: bool,
+) -> Vec<DuplicateGroup> {
+    let mut uf = UnionFind::new(items.len());
     let pairs: Vec<(usize, usize)> = (0..hashes.len())
         .into_par_iter()
         .flat_map(|i| {
@@ -272,6 +277,9 @@ pub fn group_duplicates(hashes: &[(usize, FuzzyHash)], total_items: usize, max_d
             for j in (i + 1)..hashes.len() {
                 let (idx_i, hash_i) = &hashes[i];
                 let (idx_j, hash_j) = &hashes[j];
+                if skip_same_dir && same_parent(&items[*idx_i].image_path, &items[*idx_j].image_path) {
+                    continue;
+                }
                 if hash_i.distance(hash_j) <= max_distance {
                     local.push((*idx_i, *idx_j));
                 }
@@ -306,16 +314,17 @@ pub fn find_duplicates_with_cache(
     items: &[ImageItem],
     algo: FuzzyHashAlgorithm,
     max_distance: u32,
+    skip_same_dir: bool,
     cache: Option<&mut HashCache>,
     progress: Option<&dyn ProgressObserver>,
 ) -> DuplicateReport {
     let computation = compute_hashes_with_cache(items, algo, cache, progress);
-    let groups = group_duplicates(&computation.hashes, items.len(), max_distance);
+    let groups = group_duplicates(items, &computation.hashes, max_distance, skip_same_dir);
     DuplicateReport { groups, warnings: computation.warnings }
 }
 
 pub fn find_duplicates(items: &[ImageItem], algo: FuzzyHashAlgorithm, max_distance: u32) -> DuplicateReport {
-    find_duplicates_with_cache(items, algo, max_distance, None, None)
+    find_duplicates_with_cache(items, algo, max_distance, true, None, None)
 }
 
 // Hash implementations come from the imagehash crate.
@@ -345,6 +354,15 @@ fn unpack_bits(bytes: &[u8], len: usize) -> Vec<bool> {
         out.push(((byte >> (idx % 8)) & 1) == 1);
     }
     out
+}
+
+fn same_parent(a: &Path, b: &Path) -> bool {
+    let a_parent = a.parent();
+    let b_parent = b.parent();
+    match (a_parent, b_parent) {
+        (Some(a_parent), Some(b_parent)) => a_parent == b_parent,
+        _ => false,
+    }
 }
 
 struct UnionFind {

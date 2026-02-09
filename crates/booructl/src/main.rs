@@ -277,7 +277,7 @@ fn dupes_command(
     } else {
         None
     };
-    let groups = group_duplicates(&computation.hashes, library.index.items.len(), threshold);
+    let groups = group_duplicates(&library.index.items, &computation.hashes, threshold, true);
     if let Some(sp) = spinner {
         sp.finish_and_clear();
     }
