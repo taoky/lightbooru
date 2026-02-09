@@ -10,4 +10,5 @@ serde_json.workspace = true
 walkdir.workspace = true
 thiserror.workspace = true
 image.workspace = true
+imagehash.workspace = true
 dirs.workspace = true

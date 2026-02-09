@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use image::imageops::FilterType;
+use imagehash::{average_hash, difference_hash, perceptual_hash};
 
 use crate::error::BooruError;
 use crate::scan::ImageItem;
@@ -10,17 +10,25 @@ use crate::scan::ImageItem;
 pub enum FuzzyHashAlgorithm {
     AHash,
     DHash,
+    PHash,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct FuzzyHash {
     pub algo: FuzzyHashAlgorithm,
-    pub bits: u64,
+    pub bits: Vec<bool>,
 }
 
 impl FuzzyHash {
     pub fn distance(&self, other: &FuzzyHash) -> u32 {
-        (self.bits ^ other.bits).count_ones()
+        let min_len = self.bits.len().min(other.bits.len());
+        let mut diff = 0u32;
+        for idx in 0..min_len {
+            if self.bits[idx] != other.bits[idx] {
+                diff += 1;
+            }
+        }
+        diff + (self.bits.len().max(other.bits.len()) - min_len) as u32
     }
 }
 
@@ -44,8 +52,9 @@ pub struct DuplicateReport {
 pub fn compute_fuzzy_hash(path: &Path, algo: FuzzyHashAlgorithm) -> Result<FuzzyHash, BooruError> {
     let image = image::open(path).map_err(|source| BooruError::Image { path: path.to_path_buf(), source })?;
     let bits = match algo {
-        FuzzyHashAlgorithm::AHash => compute_ahash(&image),
-        FuzzyHashAlgorithm::DHash => compute_dhash(&image),
+        FuzzyHashAlgorithm::AHash => average_hash(&image).bits,
+        FuzzyHashAlgorithm::DHash => difference_hash(&image).bits,
+        FuzzyHashAlgorithm::PHash => perceptual_hash(&image).bits,
     };
     Ok(FuzzyHash { algo, bits })
 }
@@ -67,18 +76,18 @@ pub fn find_duplicates(items: &[ImageItem], algo: FuzzyHashAlgorithm, max_distan
     let mut uf = UnionFind::new(items.len());
     for i in 0..hashes.len() {
         for j in (i + 1)..hashes.len() {
-            let (idx_i, hash_i) = hashes[i];
-            let (idx_j, hash_j) = hashes[j];
+            let (idx_i, hash_i) = &hashes[i];
+            let (idx_j, hash_j) = &hashes[j];
             if hash_i.distance(&hash_j) <= max_distance {
-                uf.union(idx_i, idx_j);
+                uf.union(*idx_i, *idx_j);
             }
         }
     }
 
     let mut groups_map: HashMap<usize, Vec<usize>> = HashMap::new();
-    for (idx, _) in hashes {
-        let root = uf.find(idx);
-        groups_map.entry(root).or_default().push(idx);
+    for (idx, _) in &hashes {
+        let root = uf.find(*idx);
+        groups_map.entry(root).or_default().push(*idx);
     }
 
     let mut groups: Vec<DuplicateGroup> = groups_map
@@ -93,40 +102,7 @@ pub fn find_duplicates(items: &[ImageItem], algo: FuzzyHashAlgorithm, max_distan
     DuplicateReport { groups, warnings }
 }
 
-fn compute_ahash(image: &image::DynamicImage) -> u64 {
-    let gray = image.to_luma8();
-    let resized = image::imageops::resize(&gray, 8, 8, FilterType::Triangle);
-    let mut sum: u32 = 0;
-    for pixel in resized.pixels() {
-        sum += pixel[0] as u32;
-    }
-    let avg = sum / 64;
-    let mut bits = 0u64;
-    for (idx, pixel) in resized.pixels().enumerate() {
-        if (pixel[0] as u32) >= avg {
-            bits |= 1u64 << idx;
-        }
-    }
-    bits
-}
-
-fn compute_dhash(image: &image::DynamicImage) -> u64 {
-    let gray = image.to_luma8();
-    let resized = image::imageops::resize(&gray, 9, 8, FilterType::Triangle);
-    let mut bits = 0u64;
-    let mut idx = 0;
-    for y in 0..8 {
-        for x in 0..8 {
-            let left = resized.get_pixel(x, y)[0];
-            let right = resized.get_pixel(x + 1, y)[0];
-            if left > right {
-                bits |= 1u64 << idx;
-            }
-            idx += 1;
-        }
-    }
-    bits
-}
+// Hash implementations come from the imagehash crate.
 
 struct UnionFind {
     parent: Vec<usize>,

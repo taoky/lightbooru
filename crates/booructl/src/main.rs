@@ -72,6 +72,7 @@ enum Commands {
 enum HashAlgo {
     Ahash,
     Dhash,
+    Phash,
 }
 
 fn main() -> Result<()> {
@@ -207,6 +208,7 @@ fn dupes_command(config: &BooruConfig, algo: HashAlgo, threshold: u32, quiet: bo
     let algo = match algo {
         HashAlgo::Ahash => FuzzyHashAlgorithm::AHash,
         HashAlgo::Dhash => FuzzyHashAlgorithm::DHash,
+        HashAlgo::Phash => FuzzyHashAlgorithm::PHash,
     };
 
     let report = find_duplicates(&library.index.items, algo, threshold);
