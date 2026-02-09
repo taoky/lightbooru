@@ -1,11 +1,13 @@
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use booru_core::{
-    apply_update_to_image, find_duplicates, metadata_path_for_image, resolve_image_path,
-    BooruConfig, EditUpdate, FuzzyHashAlgorithm, Library,
+    apply_update_to_image, compute_hashes_with_cache, group_duplicates, metadata_path_for_image,
+    resolve_image_path, BooruConfig, EditUpdate, FuzzyHashAlgorithm, HashCache, ProgressObserver, Library,
 };
 use clap::{Parser, Subcommand, ValueEnum};
+use indicatif::{ProgressBar, ProgressStyle};
 
 #[derive(Parser)]
 #[command(name = "booructl", version, about = "CLI tools for LightBooru")]
@@ -65,6 +67,12 @@ enum Commands {
         algo: HashAlgo,
         #[arg(long, default_value_t = 8)]
         threshold: u32,
+        /// Disable sqlite hash cache
+        #[arg(long)]
+        no_cache: bool,
+        /// Override cache path
+        #[arg(long)]
+        cache: Option<PathBuf>,
     },
 }
 
@@ -106,7 +114,9 @@ fn main() -> Result<()> {
             source,
         ),
         Commands::Search { tags, limit } => search_command(&config, tags, limit, cli.quiet),
-        Commands::Dupes { algo, threshold } => dupes_command(&config, algo, threshold, cli.quiet),
+        Commands::Dupes { algo, threshold, no_cache, cache } => {
+            dupes_command(&config, algo, threshold, no_cache, cache, cli.quiet)
+        }
     }
 }
 
@@ -203,7 +213,14 @@ fn search_command(config: &BooruConfig, tags: Vec<String>, limit: usize, quiet: 
     Ok(())
 }
 
-fn dupes_command(config: &BooruConfig, algo: HashAlgo, threshold: u32, quiet: bool) -> Result<()> {
+fn dupes_command(
+    config: &BooruConfig,
+    algo: HashAlgo,
+    threshold: u32,
+    no_cache: bool,
+    cache_path: Option<PathBuf>,
+    quiet: bool,
+) -> Result<()> {
     let library = scan_library(config, quiet)?;
     let algo = match algo {
         HashAlgo::Ahash => FuzzyHashAlgorithm::AHash,
@@ -211,17 +228,70 @@ fn dupes_command(config: &BooruConfig, algo: HashAlgo, threshold: u32, quiet: bo
         HashAlgo::Phash => FuzzyHashAlgorithm::PHash,
     };
 
-    let report = find_duplicates(&library.index.items, algo, threshold);
-    for warning in &report.warnings {
+    let mut cache = if no_cache {
+        None
+    } else if let Some(path) = cache_path {
+        Some(HashCache::open(&path).context("failed to open cache")?)
+    } else {
+        match HashCache::open_default() {
+            Ok(cache) => Some(cache),
+            Err(err) => {
+                if !quiet {
+                    eprintln!("warning: cache disabled: {err}");
+                }
+                None
+            }
+        }
+    };
+
+    let show_progress = !quiet && std::io::stderr().is_terminal();
+    let progress = if show_progress {
+        let pb = ProgressBar::new(library.index.items.len() as u64);
+        pb.set_style(
+            ProgressStyle::with_template("{spinner:.green} {msg} [{bar:40.cyan/blue}] {pos}/{len}")
+                .unwrap()
+                .progress_chars("=>-"),
+        );
+        pb.set_message("hashing");
+        Some(pb)
+    } else {
+        None
+    };
+
+    let observer = progress.as_ref().map(|pb| HashProgress { pb: pb.clone() });
+    let computation = compute_hashes_with_cache(
+        &library.index.items,
+        algo,
+        cache.as_mut(),
+        observer.as_ref().map(|o| o as &dyn ProgressObserver),
+    );
+    if let Some(pb) = &progress {
+        pb.finish_and_clear();
+    }
+
+    let spinner = if show_progress {
+        let sp = ProgressBar::new_spinner();
+        sp.set_message("comparing");
+        sp.enable_steady_tick(std::time::Duration::from_millis(120));
+        Some(sp)
+    } else {
+        None
+    };
+    let groups = group_duplicates(&computation.hashes, library.index.items.len(), threshold);
+    if let Some(sp) = spinner {
+        sp.finish_and_clear();
+    }
+
+    for warning in &computation.warnings {
         eprintln!("warning: {}: {}", warning.path.display(), warning.message);
     }
 
-    if report.groups.is_empty() {
+    if groups.is_empty() {
         println!("No duplicates found.");
         return Ok(());
     }
 
-    for (idx, group) in report.groups.iter().enumerate() {
+    for (idx, group) in groups.iter().enumerate() {
         println!("Group {}:", idx + 1);
         for item_idx in &group.items {
             if let Some(item) = library.index.items.get(*item_idx) {
@@ -269,4 +339,14 @@ fn flatten_tag_args(tags: Vec<String>) -> Vec<String> {
         }
     }
     out
+}
+
+struct HashProgress {
+    pb: ProgressBar,
+}
+
+impl ProgressObserver for HashProgress {
+    fn inc(&self, delta: u64) {
+        self.pb.inc(delta);
+    }
 }

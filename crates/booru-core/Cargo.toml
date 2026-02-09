@@ -13,3 +13,5 @@ image.workspace = true
 imagehash.workspace = true
 dirs.workspace = true
 rayon.workspace = true
+rusqlite.workspace = true
+xdg.workspace = true

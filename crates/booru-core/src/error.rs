@@ -20,4 +20,12 @@ pub enum BooruError {
         #[source]
         source: image::ImageError,
     },
+    #[error("database error on {path}: {source}")]
+    Database {
+        path: PathBuf,
+        #[source]
+        source: rusqlite::Error,
+    },
+    #[error("cache error: {message}")]
+    Cache { message: String },
 }
