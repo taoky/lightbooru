@@ -179,31 +179,85 @@ fn completion_command(shell: Shell, aot: bool) -> Result<()> {
 }
 
 fn complete_image_path_with_base(current: &OsStr) -> Vec<CompletionCandidate> {
-    let fallback = || PathCompleter::any().complete(current);
+    let fallback = |value: &OsStr| PathCompleter::any().complete(value);
     let Some(current) = current.to_str() else {
-        return fallback();
+        return fallback(current);
     };
+    let current_unescaped = unescape_shell_backslashes(current);
 
     // If the user explicitly types an absolute/relative prefix, fall back to shell-like completion.
-    if current.starts_with('/')
-        || current.starts_with("./")
-        || current.starts_with("../")
-        || current.starts_with('~')
-    {
-        return fallback();
+    if has_explicit_path_prefix(current) {
+        let out = fallback(OsStr::new(current));
+        if !out.is_empty() {
+            return out;
+        }
+        if let Some(unescaped) = current_unescaped.as_deref() {
+            return fallback(OsStr::new(unescaped));
+        }
+        return out;
     }
 
     let roots = completion_roots_from_env();
-    let mut seen = HashSet::new();
-    let mut out = Vec::new();
-    for root in roots {
-        collect_relative_candidates(&root, current, &mut seen, &mut out);
+    let mut out = collect_relative_candidates_for_roots(&roots, current);
+    if out.is_empty() {
+        if let Some(unescaped) = current_unescaped.as_deref() {
+            out = collect_relative_candidates_for_roots(&roots, unescaped);
+        }
     }
     if out.is_empty() {
-        fallback()
+        let fallback_out = fallback(OsStr::new(current));
+        if !fallback_out.is_empty() {
+            return fallback_out;
+        }
+        if let Some(unescaped) = current_unescaped.as_deref() {
+            return fallback(OsStr::new(unescaped));
+        }
+        fallback_out
     } else {
         out.sort_by(|a, b| a.get_value().cmp(b.get_value()));
         out
+    }
+}
+
+fn has_explicit_path_prefix(current: &str) -> bool {
+    current.starts_with('/')
+        || current.starts_with("./")
+        || current.starts_with("../")
+        || current.starts_with('~')
+}
+
+fn collect_relative_candidates_for_roots(
+    roots: &[PathBuf],
+    current: &str,
+) -> Vec<CompletionCandidate> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for root in roots {
+        collect_relative_candidates(root, current, &mut seen, &mut out);
+    }
+    out
+}
+
+fn unescape_shell_backslashes(input: &str) -> Option<String> {
+    if !input.contains('\\') {
+        return None;
+    }
+
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                out.push(next);
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    if out == input {
+        None
+    } else {
+        Some(out)
     }
 }
 
@@ -334,10 +388,7 @@ fn info_command(
         "Author: {}",
         item.merged_author().unwrap_or_else(|| "(none)".to_string())
     );
-    println!(
-        "Date: {}",
-        format_date_for_display(item.merged_date())
-    );
+    println!("Date: {}", format_date_for_display(item.merged_date()));
     println!(
         "Platform URL: {}",
         item.platform_url().unwrap_or_else(|| "(none)".to_string())
@@ -640,7 +691,10 @@ mod tests {
             .with_timezone(&Local)
             .format("%Y-%m-%d %H:%M:%S %:z")
             .to_string();
-        assert_eq!(format_date_string("1768034678").as_deref(), Some(expected.as_str()));
+        assert_eq!(
+            format_date_string("1768034678").as_deref(),
+            Some(expected.as_str())
+        );
     }
 
     #[test]
