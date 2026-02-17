@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 use booru_core::{
     apply_update_to_image, compute_hashes_with_cache, group_duplicates, metadata_path_for_image,
-    resolve_image_path, BooruConfig, EditUpdate, FuzzyHashAlgorithm, HashCache, Library,
-    ProgressObserver,
+    resolve_image_path, BooruConfig, EditUpdate, FuzzyHashAlgorithm, HashCache, ImageItem,
+    Library, ProgressObserver,
 };
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
@@ -69,10 +69,9 @@ enum Commands {
         #[arg(long)]
         notes: Option<String>,
     },
-    /// Search images by tags (AND match)
+    /// Search images by substring in tags/author/detail
     Search {
-        #[arg(long = "tag")]
-        tags: Vec<String>,
+        terms: Vec<String>,
         #[arg(long, default_value_t = 100)]
         limit: usize,
     },
@@ -140,7 +139,7 @@ fn main() -> Result<()> {
             clear_tags,
             notes,
         ),
-        Commands::Search { tags, limit } => search_command(&config, tags, limit, cli.quiet),
+        Commands::Search { terms, limit } => search_command(&config, terms, limit, cli.quiet),
         Commands::Dupes {
             algo,
             threshold,
@@ -455,17 +454,21 @@ fn edit_command(
 
 fn search_command(
     config: &BooruConfig,
-    tags: Vec<String>,
+    terms: Vec<String>,
     limit: usize,
     quiet: bool,
 ) -> Result<()> {
     let library = scan_library(config, quiet)?;
-    let query_tags = flatten_tag_args(tags);
-    if query_tags.is_empty() {
-        return Err(anyhow!("no tags provided"));
+    let query_terms = normalize_search_terms(terms);
+    if query_terms.is_empty() {
+        return Err(anyhow!("no search terms provided"));
     }
 
-    let mut results = library.index.search_by_tags_all(&query_tags);
+    let mut results = library
+        .index
+        .iter()
+        .filter(|item| item_matches_search_terms(item, &query_terms))
+        .collect::<Vec<_>>();
     results.sort_by_key(|item| item.image_path.clone());
     for item in results.into_iter().take(limit) {
         println!("{}", item.image_path.display());
@@ -601,6 +604,37 @@ fn flatten_tag_args(tags: Vec<String>) -> Vec<String> {
     out
 }
 
+fn normalize_search_terms(terms: Vec<String>) -> Vec<String> {
+    terms
+        .into_iter()
+        .map(|term| term.trim().to_string())
+        .filter(|term| !term.is_empty())
+        .collect()
+}
+
+fn item_matches_search_terms(item: &ImageItem, terms: &[String]) -> bool {
+    let tags = item
+        .merged_tags()
+        .into_iter()
+        .map(|tag| tag.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let author = item.merged_author().map(|author| author.to_ascii_lowercase());
+    let detail = item.merged_detail().map(|detail| detail.to_ascii_lowercase());
+
+    terms.iter().any(|term| {
+        let needle = term.to_ascii_lowercase();
+        tags.iter().any(|tag| tag.contains(&needle))
+            || author
+                .as_ref()
+                .map(|author| author.contains(&needle))
+                .unwrap_or(false)
+            || detail
+                .as_ref()
+                .map(|detail| detail.contains(&needle))
+                .unwrap_or(false)
+    })
+}
+
 struct HashProgress {
     pb: ProgressBar,
 }
@@ -678,9 +712,23 @@ fn format_local_datetime(dt: DateTime<Local>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Local, TimeZone, Utc};
+    use std::path::PathBuf;
 
-    use super::format_date_string;
+    use booru_core::BooruEdits;
+    use chrono::{Local, TimeZone, Utc};
+    use serde_json::json;
+
+    use super::{format_date_string, item_matches_search_terms};
+
+    fn make_item(original: serde_json::Value) -> booru_core::ImageItem {
+        booru_core::ImageItem {
+            image_path: PathBuf::new(),
+            meta_path: PathBuf::new(),
+            booru_path: PathBuf::new(),
+            original,
+            edits: BooruEdits::default(),
+        }
+    }
 
     #[test]
     fn format_unix_seconds_for_display() {
@@ -701,5 +749,32 @@ mod tests {
     fn format_naive_datetime_for_display() {
         let formatted = format_date_string("2025-02-12 03:33:51").expect("should parse");
         assert!(formatted.starts_with("2025-02-12 03:33:51 "));
+    }
+
+    #[test]
+    fn search_matches_tag_author_and_detail_by_substring() {
+        let item = make_item(json!({
+            "tags": ["flower_garden"],
+            "author": "AlicePainter",
+            "detail": "Sunlight over the hills",
+        }));
+
+        assert!(item_matches_search_terms(&item, &[String::from("garden")]));
+        assert!(item_matches_search_terms(&item, &[String::from("painter")]));
+        assert!(item_matches_search_terms(&item, &[String::from("sunlight")]));
+    }
+
+    #[test]
+    fn search_is_case_insensitive_and_uses_any_term() {
+        let item = make_item(json!({
+            "tags": ["blue_sky"],
+            "author": "Bob",
+            "detail": "Evening clouds",
+        }));
+
+        assert!(item_matches_search_terms(
+            &item,
+            &[String::from("nomatch"), String::from("CLOUD")]
+        ));
     }
 }
