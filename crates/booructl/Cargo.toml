@@ -10,4 +10,5 @@ clap_complete = { workspace = true, features = ["unstable-dynamic"] }
 anyhow.workspace = true
 serde_json.workspace = true
 indicatif.workspace = true
+chrono.workspace = true
 booru-core = { path = "../booru-core" }

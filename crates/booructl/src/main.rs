@@ -10,6 +10,7 @@ use booru_core::{
     resolve_image_path, BooruConfig, EditUpdate, FuzzyHashAlgorithm, HashCache, Library,
     ProgressObserver,
 };
+use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::engine::{
     ArgValueCompleter, CompletionCandidate, PathCompleter, ValueCompleter,
@@ -66,11 +67,7 @@ enum Commands {
         #[arg(long)]
         clear_tags: bool,
         #[arg(long)]
-        rating: Option<String>,
-        #[arg(long)]
         notes: Option<String>,
-        #[arg(long)]
-        source: Option<String>,
     },
     /// Search images by tags (AND match)
     Search {
@@ -133,9 +130,7 @@ fn main() -> Result<()> {
             add_tags,
             remove_tags,
             clear_tags,
-            rating,
             notes,
-            source,
         } => edit_command(
             &config,
             &path,
@@ -143,9 +138,7 @@ fn main() -> Result<()> {
             add_tags,
             remove_tags,
             clear_tags,
-            rating,
             notes,
-            source,
         ),
         Commands::Search { tags, limit } => search_command(&config, tags, limit, cli.quiet),
         Commands::Dupes {
@@ -338,16 +331,30 @@ fn info_command(
         println!("Tags: {}", tags.join(" "));
     }
     println!(
-        "Rating: {}",
-        item.merged_rating().unwrap_or_else(|| "(none)".to_string())
+        "Author: {}",
+        item.merged_author().unwrap_or_else(|| "(none)".to_string())
     );
     println!(
-        "Source: {}",
-        item.merged_source().unwrap_or_else(|| "(none)".to_string())
+        "Date: {}",
+        format_date_for_display(item.merged_date())
     );
-    if let Some(notes) = &item.edits.notes {
-        println!("Notes: {notes}");
+    println!(
+        "Platform URL: {}",
+        item.platform_url().unwrap_or_else(|| "(none)".to_string())
+    );
+    match item.merged_detail() {
+        Some(detail) if detail.contains('\n') => println!("Detail:\n{detail}"),
+        Some(detail) => println!("Detail: {detail}"),
+        None => println!("Detail: (none)"),
     }
+    println!(
+        "Sensitive (NSFW): {}",
+        if item.merged_sensitive() { "yes" } else { "no" }
+    );
+    println!(
+        "Notes (user): {}",
+        item.edits.notes.as_deref().unwrap_or("(none)")
+    );
 
     if original {
         let pretty = serde_json::to_string_pretty(&item.original)?;
@@ -368,9 +375,7 @@ fn edit_command(
     add_tags: Vec<String>,
     remove_tags: Vec<String>,
     clear_tags: bool,
-    rating: Option<String>,
     notes: Option<String>,
-    source: Option<String>,
 ) -> Result<()> {
     let image_path = resolve_image_path(path, &config.roots);
     if !image_path.exists() {
@@ -387,9 +392,7 @@ fn edit_command(
         add_tags: flatten_tag_args(add_tags),
         remove_tags: flatten_tag_args(remove_tags),
         clear_tags,
-        rating,
         notes,
-        source,
     };
 
     let edits =
@@ -554,5 +557,95 @@ struct HashProgress {
 impl ProgressObserver for HashProgress {
     fn inc(&self, delta: u64) {
         self.pb.inc(delta);
+    }
+}
+
+fn format_date_for_display(raw: Option<String>) -> String {
+    let Some(raw) = raw else {
+        return "(none)".to_string();
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "(none)".to_string();
+    }
+    format_date_string(trimmed).unwrap_or_else(|| trimmed.to_string())
+}
+
+fn format_date_string(raw: &str) -> Option<String> {
+    if let Ok(ts) = raw.parse::<i64>() {
+        return format_unix_timestamp(ts);
+    }
+
+    if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
+        return Some(format_local_datetime(dt.with_timezone(&Local)));
+    }
+
+    if let Ok(dt) = DateTime::parse_from_str(raw, "%a %b %d %H:%M:%S %z %Y") {
+        return Some(format_local_datetime(dt.with_timezone(&Local)));
+    }
+
+    for fmt in [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+    ] {
+        if let Ok(naive) = NaiveDateTime::parse_from_str(raw, fmt) {
+            if let Some(local_dt) = localize_naive_datetime(naive) {
+                return Some(format_local_datetime(local_dt));
+            }
+        }
+    }
+
+    None
+}
+
+fn format_unix_timestamp(ts: i64) -> Option<String> {
+    let (seconds, nanos) = if ts.abs() >= 1_000_000_000_000 {
+        let seconds = ts.div_euclid(1000);
+        let millis = ts.rem_euclid(1000) as u32;
+        (seconds, millis * 1_000_000)
+    } else {
+        (ts, 0)
+    };
+
+    let utc = Utc.timestamp_opt(seconds, nanos).single()?;
+    Some(format_local_datetime(utc.with_timezone(&Local)))
+}
+
+fn localize_naive_datetime(naive: NaiveDateTime) -> Option<DateTime<Local>> {
+    let local = Local.from_local_datetime(&naive);
+    local
+        .single()
+        .or_else(|| local.earliest())
+        .or_else(|| local.latest())
+}
+
+fn format_local_datetime(dt: DateTime<Local>) -> String {
+    dt.format("%Y-%m-%d %H:%M:%S %:z").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Local, TimeZone, Utc};
+
+    use super::format_date_string;
+
+    #[test]
+    fn format_unix_seconds_for_display() {
+        let expected = Utc
+            .timestamp_opt(1768034678, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M:%S %:z")
+            .to_string();
+        assert_eq!(format_date_string("1768034678").as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn format_naive_datetime_for_display() {
+        let formatted = format_date_string("2025-02-12 03:33:51").expect("should parse");
+        assert!(formatted.starts_with("2025-02-12 03:33:51 "));
     }
 }

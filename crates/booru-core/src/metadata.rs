@@ -19,9 +19,7 @@ pub struct TagEdits {
 #[serde(default)]
 pub struct BooruEdits {
     pub tags: TagEdits,
-    pub rating: Option<String>,
     pub notes: Option<String>,
-    pub source: Option<String>,
     #[serde(flatten)]
     pub extra: HashMap<String, Value>,
 }
@@ -32,9 +30,7 @@ pub struct EditUpdate {
     pub add_tags: Vec<String>,
     pub remove_tags: Vec<String>,
     pub clear_tags: bool,
-    pub rating: Option<String>,
     pub notes: Option<String>,
-    pub source: Option<String>,
 }
 
 impl BooruEdits {
@@ -111,14 +107,8 @@ impl BooruEdits {
             }
         }
 
-        if let Some(rating) = update.rating {
-            self.rating = Some(rating);
-        }
         if let Some(notes) = update.notes {
             self.notes = Some(notes);
-        }
-        if let Some(source) = update.source {
-            self.source = Some(source);
         }
     }
 
@@ -149,6 +139,7 @@ pub fn extract_tags(value: &Value) -> Vec<String> {
 
     let keys = [
         "tags",
+        "hashtags",
         "tag_string",
         "tag_string_general",
         "tag_string_character",
@@ -180,6 +171,41 @@ pub fn extract_string_field(value: &Value, keys: &[&str]) -> Option<String> {
     None
 }
 
+pub fn extract_scalar_field(value: &Value, keys: &[&str]) -> Option<String> {
+    let obj = value.as_object()?;
+    for key in keys {
+        if let Some(v) = obj.get(*key) {
+            if let Some(s) = nonempty_scalar_string(v) {
+                return Some(s);
+            }
+        }
+    }
+    None
+}
+
+pub fn extract_nested_scalar_field(value: &Value, paths: &[&[&str]]) -> Option<String> {
+    for path in paths {
+        if let Some(v) = get_nested_value(value, path) {
+            if let Some(s) = nonempty_scalar_string(v) {
+                return Some(s);
+            }
+        }
+    }
+    None
+}
+
+pub fn extract_bool_field(value: &Value, keys: &[&str]) -> Option<bool> {
+    let obj = value.as_object()?;
+    for key in keys {
+        if let Some(v) = obj.get(*key) {
+            if let Some(flag) = nonempty_bool(v) {
+                return Some(flag);
+            }
+        }
+    }
+    None
+}
+
 fn collect_tags(value: &Value, tags: &mut Vec<String>, seen: &mut HashSet<String>) {
     match value {
         Value::String(s) => {
@@ -198,12 +224,61 @@ fn collect_tags(value: &Value, tags: &mut Vec<String>, seen: &mut HashSet<String
                         if let Some(Value::String(tag)) = obj.get("tag") {
                             push_tag(tag, tags, seen);
                         }
+                        if let Some(Value::String(text)) = obj.get("text") {
+                            push_tag(text, tags, seen);
+                        }
                     }
                     _ => {}
                 }
             }
         }
         _ => {}
+    }
+}
+
+fn get_nested_value<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    if path.is_empty() {
+        return Some(value);
+    }
+
+    let mut current = value;
+    for key in path {
+        let obj = current.as_object()?;
+        current = obj.get(*key)?;
+    }
+    Some(current)
+}
+
+fn nonempty_scalar_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => {
+            let s = s.trim();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        }
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+fn nonempty_bool(value: &Value) -> Option<bool> {
+    match value {
+        Value::Bool(b) => Some(*b),
+        Value::Number(n) => n.as_i64().map(|x| x != 0),
+        Value::String(s) => parse_bool_string(s),
+        _ => None,
+    }
+}
+
+fn parse_bool_string(s: &str) -> Option<bool> {
+    let normalized = s.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "1" | "true" | "yes" | "y" | "on" => Some(true),
+        "0" | "false" | "no" | "n" | "off" => Some(false),
+        _ => None,
     }
 }
 
@@ -264,4 +339,74 @@ fn to_ordered_set(tags: Vec<String>) -> HashSet<String> {
         seen.insert(tag);
     }
     seen
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{
+        extract_bool_field, extract_nested_scalar_field, extract_scalar_field, extract_string_field,
+        extract_tags,
+    };
+
+    #[test]
+    fn extract_string_field_ignores_empty() {
+        let value = json!({
+            "a": "",
+            "b": "  hello  ",
+        });
+        assert_eq!(
+            extract_string_field(&value, &["a", "b"]).as_deref(),
+            Some("  hello  ")
+        );
+    }
+
+    #[test]
+    fn extract_scalar_field_supports_number() {
+        let value = json!({
+            "timestamp": 1700000000,
+        });
+        assert_eq!(
+            extract_scalar_field(&value, &["date", "timestamp"]).as_deref(),
+            Some("1700000000")
+        );
+    }
+
+    #[test]
+    fn extract_nested_scalar_field_reads_nested_author() {
+        let value = json!({
+            "user": {
+                "name": "alice",
+            }
+        });
+        assert_eq!(
+            extract_nested_scalar_field(&value, &[&["user", "name"]]).as_deref(),
+            Some("alice")
+        );
+    }
+
+    #[test]
+    fn extract_bool_field_supports_bool_and_string() {
+        let value = json!({
+            "sensitive": true,
+            "nsfw": "false",
+        });
+        assert_eq!(extract_bool_field(&value, &["sensitive"]), Some(true));
+        assert_eq!(extract_bool_field(&value, &["nsfw"]), Some(false));
+    }
+
+    #[test]
+    fn extract_tags_reads_twitter_hashtags() {
+        let value = json!({
+            "hashtags": [
+                "理由もなく再掲していいタグ",
+                {"text": "シェリハン"}
+            ]
+        });
+        assert_eq!(
+            extract_tags(&value),
+            vec!["理由もなく再掲していいタグ", "シェリハン"]
+        );
+    }
 }

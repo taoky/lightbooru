@@ -7,7 +7,11 @@ use walkdir::WalkDir;
 
 use crate::config::BooruConfig;
 use crate::error::BooruError;
-use crate::metadata::{extract_string_field, extract_tags, BooruEdits};
+use crate::metadata::{
+    extract_bool_field, extract_nested_scalar_field, extract_scalar_field, extract_string_field,
+    extract_tags,
+    BooruEdits,
+};
 use crate::path::{booru_path_for_image, metadata_path_for_image, resolve_image_path};
 
 #[derive(Clone, Debug)]
@@ -25,18 +29,275 @@ impl ImageItem {
         self.edits.merged_tags(&original_tags)
     }
 
-    pub fn merged_rating(&self) -> Option<String> {
-        if let Some(rating) = &self.edits.rating {
-            return Some(rating.clone());
+    pub fn merged_detail(&self) -> Option<String> {
+        if extract_string_field(&self.original, &["category"]).as_deref() == Some("bilibili") {
+            if let Some(detail) = bilibili_detail_text(&self.original) {
+                return Some(detail);
+            }
         }
-        extract_string_field(&self.original, &["rating", "rating_string"])
+
+        if let Some(detail) = extract_string_field(
+            &self.original,
+            &[
+                "detail",
+                "text_raw",
+                "text",
+                "content",
+                "body",
+                "caption",
+                "description",
+                "summary",
+                "title",
+                "spoiler_text",
+            ],
+        ) {
+            return Some(detail);
+        }
+
+        extract_nested_scalar_field(
+            &self.original,
+            &[
+                &["status", "text_raw"],
+                &["status", "text"],
+                &["status", "longTextContent_raw"],
+                &["status", "longTextContent"],
+            ],
+        )
     }
 
-    pub fn merged_source(&self) -> Option<String> {
-        if let Some(source) = &self.edits.source {
-            return Some(source.clone());
+    pub fn merged_author(&self) -> Option<String> {
+        if let Some(author) =
+            extract_string_field(&self.original, &["author", "username", "blog_name", "tag_string_artist"])
+        {
+            return Some(author);
         }
-        extract_string_field(&self.original, &["source", "source_url", "file_url"])
+
+        extract_nested_scalar_field(
+            &self.original,
+            &[
+                &["user", "name"],
+                &["user", "username"],
+                &["user", "screen_name"],
+                &["user", "id"],
+                &["status", "user", "name"],
+                &["status", "user", "username"],
+                &["status", "user", "screen_name"],
+                &["status", "user", "idstr"],
+                &["status", "user", "id"],
+                &["account", "display_name"],
+                &["account", "username"],
+                &["account", "acct"],
+                &["blog", "name"],
+                &["blog", "title"],
+            ],
+        )
+        .or_else(|| extract_first_array_string_field(&self.original, &["tags_artist"]))
+    }
+
+    pub fn merged_date(&self) -> Option<String> {
+        extract_scalar_field(
+            &self.original,
+            &[
+                "date",
+                "created_at",
+                "create_date",
+                "published_at",
+                "timestamp",
+            ],
+        )
+        .or_else(|| {
+            extract_nested_scalar_field(&self.original, &[&["detail", "modules", "module_author", "pub_ts"]])
+        })
+        .or_else(|| {
+            extract_nested_scalar_field(
+                &self.original,
+                &[&["status", "date"], &["status", "created_at"]],
+            )
+        })
+    }
+
+    pub fn merged_sensitive(&self) -> bool {
+        if let Some(flag) = extract_bool_field(
+            &self.original,
+            &["sensitive", "nsfw", "is_sensitive", "is_nsfw"],
+        ) {
+            return flag;
+        }
+
+        if let Some(value) = extract_scalar_field(
+            &self.original,
+            &["sensitive", "nsfw", "is_sensitive", "is_nsfw"],
+        ) {
+            if let Some(flag) = sensitive_value_to_bool(&value) {
+                return flag;
+            }
+        }
+        false
+    }
+
+    pub fn platform_url(&self) -> Option<String> {
+        let category = extract_string_field(&self.original, &["category"])?;
+        match category.as_str() {
+            "twitter" => twitter_status_url(&self.original),
+            "weibo" => weibo_status_url(&self.original),
+            "pixiv" => pixiv_artwork_url(&self.original),
+            "danbooru" => danbooru_post_url(&self.original),
+            "yandere" => yandere_post_url(&self.original),
+            "tumblr" => extract_string_field(&self.original, &["post_url", "short_url"]),
+            "mastodon" => extract_string_field(&self.original, &["uri", "url"]),
+            "bilibili" => bilibili_space_url(&self.original),
+            _ => extract_string_field(
+                &self.original,
+                &["post_url", "uri", "source_url", "url", "live_url"],
+            ),
+        }
+    }
+}
+
+fn sensitive_value_to_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "sensitive" | "nsfw" | "adult" | "explicit" | "questionable" | "r18" | "mature" => {
+            Some(true)
+        }
+        "safe" | "sfw" | "general" => Some(false),
+        _ => None,
+    }
+}
+
+fn extract_first_array_string_field(value: &Value, keys: &[&str]) -> Option<String> {
+    let obj = value.as_object()?;
+    for key in keys {
+        let Some(arr) = obj.get(*key).and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for item in arr {
+            match item {
+                Value::String(s) => {
+                    let s = s.trim();
+                    if !s.is_empty() {
+                        return Some(s.to_string());
+                    }
+                }
+                Value::Object(map) => {
+                    for field in ["name", "tag", "text"] {
+                        if let Some(Value::String(s)) = map.get(field) {
+                            let s = s.trim();
+                            if !s.is_empty() {
+                                return Some(s.to_string());
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+fn twitter_status_url(value: &Value) -> Option<String> {
+    let tweet_id = extract_scalar_field(value, &["tweet_id", "id"])?;
+    if let Some(author) = extract_string_field(value, &["author"]).or_else(|| {
+        extract_nested_scalar_field(
+            value,
+            &[
+                &["author", "name"],
+                &["author", "username"],
+                &["author", "screen_name"],
+                &["user", "name"],
+                &["user", "username"],
+                &["user", "screen_name"],
+            ],
+        )
+    }) {
+        let handle = author.trim_start_matches('@');
+        if !handle.is_empty() {
+            return Some(format!("https://x.com/{handle}/status/{tweet_id}"));
+        }
+    }
+    Some(format!("https://x.com/i/status/{tweet_id}"))
+}
+
+fn weibo_status_url(value: &Value) -> Option<String> {
+    if let Some(url) = extract_nested_scalar_field(value, &[&["status", "url"]]) {
+        return Some(url);
+    }
+
+    let mblogid = extract_nested_scalar_field(value, &[&["status", "mblogid"]])?;
+    if let Some(uid) = extract_nested_scalar_field(value, &[&["status", "user", "idstr"]]) {
+        return Some(format!("https://weibo.com/{uid}/{mblogid}"));
+    }
+    Some(format!("https://weibo.com/n/{mblogid}"))
+}
+
+fn pixiv_artwork_url(value: &Value) -> Option<String> {
+    let id = extract_scalar_field(value, &["id"])?;
+    Some(format!("https://www.pixiv.net/artworks/{id}"))
+}
+
+fn danbooru_post_url(value: &Value) -> Option<String> {
+    let id = extract_scalar_field(value, &["id"])?;
+    Some(format!("https://danbooru.donmai.us/posts/{id}"))
+}
+
+fn yandere_post_url(value: &Value) -> Option<String> {
+    let id = extract_scalar_field(value, &["id"])?;
+    Some(format!("https://yande.re/post/show/{id}"))
+}
+
+fn bilibili_space_url(value: &Value) -> Option<String> {
+    let opus_id = extract_nested_scalar_field(
+        value,
+        &[
+            &["detail", "id_str"],
+            &["id"],
+        ],
+    )?;
+    Some(format!("https://www.bilibili.com/opus/{opus_id}"))
+}
+
+fn bilibili_detail_text(value: &Value) -> Option<String> {
+    let paragraphs = value
+        .pointer("/detail/modules/module_content/paragraphs")
+        .and_then(Value::as_array)?;
+
+    let mut out = String::new();
+    for paragraph in paragraphs {
+        let Some(nodes) = paragraph
+            .get("text")
+            .and_then(|v| v.get("nodes"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+
+        for node in nodes {
+            if let Some(words) = node
+                .get("word")
+                .and_then(|v| v.get("words"))
+                .and_then(Value::as_str)
+            {
+                out.push_str(words);
+                continue;
+            }
+
+            if let Some(rich) = node.get("rich") {
+                if let Some(text) = rich.get("orig_text").and_then(Value::as_str) {
+                    out.push_str(text);
+                    continue;
+                }
+                if let Some(text) = rich.get("text").and_then(Value::as_str) {
+                    out.push_str(text);
+                }
+            }
+        }
+    }
+
+    let trimmed = out.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -214,4 +475,163 @@ fn read_json(path: &Path) -> Result<Value, BooruError> {
         path: path.to_path_buf(),
         source,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use serde_json::json;
+
+    use super::ImageItem;
+    use crate::metadata::BooruEdits;
+
+    fn make_item(original: serde_json::Value) -> ImageItem {
+        ImageItem {
+            image_path: PathBuf::new(),
+            meta_path: PathBuf::new(),
+            booru_path: PathBuf::new(),
+            original,
+            edits: BooruEdits::default(),
+        }
+    }
+
+    #[test]
+    fn merged_sensitive_parses_sensitive_keywords() {
+        let nsfw_item = make_item(json!({ "sensitive": "nsfw" }));
+        let sfw_item = make_item(json!({ "sensitive": "sfw" }));
+        assert!(nsfw_item.merged_sensitive());
+        assert!(!sfw_item.merged_sensitive());
+    }
+
+    #[test]
+    fn merged_sensitive_ignores_unrelated_field() {
+        let item = make_item(json!({ "score": "explicit" }));
+        assert!(!item.merged_sensitive());
+    }
+
+    #[test]
+    fn merged_detail_reads_weibo_status_text() {
+        let item = make_item(json!({
+            "status": {
+                "text": "weibo text",
+            }
+        }));
+        assert_eq!(item.merged_detail().as_deref(), Some("weibo text"));
+    }
+
+    #[test]
+    fn platform_url_twitter_from_tweet_id_and_author() {
+        let item = make_item(json!({
+            "category": "twitter",
+            "tweet_id": "12345",
+            "author": "alice",
+        }));
+        assert_eq!(
+            item.platform_url().as_deref(),
+            Some("https://x.com/alice/status/12345")
+        );
+    }
+
+    #[test]
+    fn platform_url_twitter_from_nested_author_object() {
+        let item = make_item(json!({
+            "category": "twitter",
+            "tweet_id": "12345",
+            "author": { "name": "alice" },
+        }));
+        assert_eq!(
+            item.platform_url().as_deref(),
+            Some("https://x.com/alice/status/12345")
+        );
+    }
+
+    #[test]
+    fn platform_url_weibo_from_mblogid() {
+        let item = make_item(json!({
+            "category": "weibo",
+            "status": {
+                "mblogid": "PdVpABGap",
+                "user": {
+                    "idstr": "7521361627"
+                }
+            }
+        }));
+        assert_eq!(
+            item.platform_url().as_deref(),
+            Some("https://weibo.com/7521361627/PdVpABGap")
+        );
+    }
+
+    #[test]
+    fn platform_url_bilibili_uses_opus_id() {
+        let item = make_item(json!({
+            "category": "bilibili",
+            "detail": {
+                "id_str": "1156189210217021443"
+            }
+        }));
+        assert_eq!(
+            item.platform_url().as_deref(),
+            Some("https://www.bilibili.com/opus/1156189210217021443")
+        );
+    }
+
+    #[test]
+    fn merged_detail_reads_bilibili_module_content() {
+        let item = make_item(json!({
+            "category": "bilibili",
+            "detail": {
+                "modules": {
+                    "module_content": {
+                        "paragraphs": [
+                            {
+                                "text": {
+                                    "nodes": [
+                                        { "word": { "words": "第一句" } },
+                                        { "rich": { "orig_text": "[表情]" } },
+                                        { "word": { "words": "第二句" } }
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        }));
+        assert_eq!(item.merged_detail().as_deref(), Some("第一句[表情]第二句"));
+    }
+
+    #[test]
+    fn merged_date_reads_bilibili_pub_ts() {
+        let item = make_item(json!({
+            "category": "bilibili",
+            "detail": {
+                "modules": {
+                    "module_author": {
+                        "pub_ts": 1768034678
+                    }
+                }
+            }
+        }));
+        assert_eq!(item.merged_date().as_deref(), Some("1768034678"));
+    }
+
+    #[test]
+    fn merged_author_reads_danbooru_tag_string_artist() {
+        let item = make_item(json!({
+            "category": "danbooru",
+            "tag_string_artist": "myowa"
+        }));
+        assert_eq!(item.merged_author().as_deref(), Some("myowa"));
+    }
+
+    #[test]
+    fn merged_author_reads_danbooru_tags_artist_array() {
+        let item = make_item(json!({
+            "category": "danbooru",
+            "tags_artist": ["myowa"]
+        }));
+        assert_eq!(item.merged_author().as_deref(), Some("myowa"));
+    }
 }
