@@ -30,39 +30,47 @@ impl ImageItem {
     }
 
     pub fn merged_detail(&self) -> Option<String> {
-        if extract_string_field(&self.original, &["category"]).as_deref() == Some("bilibili") {
+        let category = extract_string_field(&self.original, &["category"]);
+
+        if category.as_deref() == Some("bilibili") {
             if let Some(detail) = bilibili_detail_text(&self.original) {
                 return Some(detail);
             }
         }
 
-        if let Some(detail) = extract_string_field(
-            &self.original,
-            &[
-                "detail",
-                "text_raw",
-                "text",
-                "content",
-                "body",
-                "caption",
-                "description",
-                "summary",
-                "title",
-                "spoiler_text",
-            ],
-        ) {
-            return Some(detail);
+        for key in [
+            "detail",
+            "text_raw",
+            "text",
+            "content",
+            "body",
+            "caption",
+            "description",
+            "summary",
+            "title",
+            "spoiler_text",
+        ] {
+            if let Some(detail) = extract_string_field(&self.original, &[key]) {
+                if let Some(sanitized) = sanitize_detail_for_category(category.as_deref(), detail) {
+                    return Some(sanitized);
+                }
+            }
         }
 
-        extract_nested_scalar_field(
-            &self.original,
-            &[
-                &["status", "text_raw"],
-                &["status", "text"],
-                &["status", "longTextContent_raw"],
-                &["status", "longTextContent"],
-            ],
-        )
+        for path in [
+            &["status", "text_raw"][..],
+            &["status", "text"][..],
+            &["status", "longTextContent_raw"][..],
+            &["status", "longTextContent"][..],
+        ] {
+            if let Some(detail) = extract_nested_scalar_field(&self.original, &[path]) {
+                if let Some(sanitized) = sanitize_detail_for_category(category.as_deref(), detail) {
+                    return Some(sanitized);
+                }
+            }
+        }
+
+        None
     }
 
     pub fn merged_author(&self) -> Option<String> {
@@ -301,6 +309,101 @@ fn bilibili_detail_text(value: &Value) -> Option<String> {
     }
 }
 
+fn sanitize_detail_for_category(category: Option<&str>, detail: String) -> Option<String> {
+    match category {
+        Some(name) if name.eq_ignore_ascii_case("tumblr") => sanitize_tumblr_detail(&detail),
+        _ => Some(detail),
+    }
+}
+
+fn sanitize_tumblr_detail(detail: &str) -> Option<String> {
+    if !detail.contains('<') {
+        let trimmed = detail.trim();
+        return if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+    }
+
+    let mut out = String::new();
+    let mut chars = detail.chars().peekable();
+    let mut in_tag = false;
+    let mut tag_buf = String::new();
+
+    while let Some(ch) = chars.next() {
+        if in_tag {
+            if ch == '>' {
+                if should_insert_line_break_for_tag(&tag_buf) {
+                    push_line_break(&mut out);
+                }
+                tag_buf.clear();
+                in_tag = false;
+            } else {
+                tag_buf.push(ch);
+            }
+            continue;
+        }
+
+        if ch == '<' {
+            let is_tag_start = matches!(
+                chars.peek(),
+                Some(next) if next.is_ascii_alphabetic() || *next == '/' || *next == '!' || *next == '?'
+            );
+            if is_tag_start {
+                in_tag = true;
+                continue;
+            }
+        }
+
+        out.push(ch);
+    }
+
+    if in_tag {
+        out.push('<');
+        out.push_str(&tag_buf);
+    }
+
+    let normalized = out
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn should_insert_line_break_for_tag(raw_tag: &str) -> bool {
+    let tag = raw_tag.trim_start();
+    let tag = match tag.strip_prefix('/') {
+        Some(stripped) => stripped.trim_start(),
+        None => tag,
+    };
+
+    let name_end = tag
+        .find(|ch: char| ch.is_ascii_whitespace() || ch == '/')
+        .unwrap_or(tag.len());
+    if name_end == 0 {
+        return false;
+    }
+
+    matches!(
+        &tag[..name_end].to_ascii_lowercase()[..],
+        "br" | "p" | "div" | "figure" | "figcaption" | "li" | "tr"
+    )
+}
+
+fn push_line_break(out: &mut String) {
+    if out.is_empty() || out.ends_with('\n') {
+        return;
+    }
+    out.push('\n');
+}
+
 #[derive(Debug)]
 pub struct ScanWarning {
     pub path: PathBuf,
@@ -518,6 +621,25 @@ mod tests {
             }
         }));
         assert_eq!(item.merged_detail().as_deref(), Some("weibo text"));
+    }
+
+    #[test]
+    fn merged_detail_strips_tumblr_html_and_images() {
+        let item = make_item(json!({
+            "category": "tumblr",
+            "detail": "<div class=\"npf_row\"><figure class=\"tmblr-full\"><img src=\"https://example.com/image.png\"/></figure></div><p>2022.2.10</p><p>ゆるキャン△</p>"
+        }));
+        assert_eq!(item.merged_detail().as_deref(), Some("2022.2.10\nゆるキャン△"));
+    }
+
+    #[test]
+    fn merged_detail_tumblr_falls_back_when_primary_is_only_images() {
+        let item = make_item(json!({
+            "category": "tumblr",
+            "detail": "<div><img src=\"https://example.com/image.png\"/></div>",
+            "summary": "summary text"
+        }));
+        assert_eq!(item.merged_detail().as_deref(), Some("summary text"));
     }
 
     #[test]
