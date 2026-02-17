@@ -1,3 +1,4 @@
+pub mod alias;
 pub mod config;
 pub mod edit;
 pub mod error;
@@ -6,6 +7,13 @@ pub mod metadata;
 pub mod path;
 pub mod scan;
 
+pub use alias::{
+    alias_map_from_groups, alias_path_for_root, expand_search_terms_with_aliases,
+    load_alias_groups_from_path, load_alias_groups_from_root, load_alias_map_from_roots,
+    merge_alias_terms, normalize_alias_groups, normalize_search_term, normalize_search_terms,
+    remove_alias_terms, save_alias_groups_to_path, save_alias_groups_to_root, AliasGroups,
+    AliasMap, AliasWarning, ALIAS_FILE_NAME,
+};
 pub use config::BooruConfig;
 pub use edit::apply_update_to_image;
 pub use error::BooruError;

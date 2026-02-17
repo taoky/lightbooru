@@ -346,8 +346,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        extract_bool_field, extract_nested_scalar_field, extract_scalar_field, extract_string_field,
-        extract_tags,
+        extract_bool_field, extract_nested_scalar_field, extract_scalar_field,
+        extract_string_field, extract_tags,
     };
 
     #[test]

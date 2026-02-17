@@ -5,12 +5,12 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use walkdir::WalkDir;
 
+use crate::alias::ALIAS_FILE_NAME;
 use crate::config::BooruConfig;
 use crate::error::BooruError;
 use crate::metadata::{
     extract_bool_field, extract_nested_scalar_field, extract_scalar_field, extract_string_field,
-    extract_tags,
-    BooruEdits,
+    extract_tags, BooruEdits,
 };
 use crate::path::{booru_path_for_image, metadata_path_for_image, resolve_image_path};
 
@@ -74,9 +74,10 @@ impl ImageItem {
     }
 
     pub fn merged_author(&self) -> Option<String> {
-        if let Some(author) =
-            extract_string_field(&self.original, &["author", "username", "blog_name", "tag_string_artist"])
-        {
+        if let Some(author) = extract_string_field(
+            &self.original,
+            &["author", "username", "blog_name", "tag_string_artist"],
+        ) {
             return Some(author);
         }
 
@@ -114,7 +115,10 @@ impl ImageItem {
             ],
         )
         .or_else(|| {
-            extract_nested_scalar_field(&self.original, &[&["detail", "modules", "module_author", "pub_ts"]])
+            extract_nested_scalar_field(
+                &self.original,
+                &[&["detail", "modules", "module_author", "pub_ts"]],
+            )
         })
         .or_else(|| {
             extract_nested_scalar_field(
@@ -254,13 +258,7 @@ fn yandere_post_url(value: &Value) -> Option<String> {
 }
 
 fn bilibili_space_url(value: &Value) -> Option<String> {
-    let opus_id = extract_nested_scalar_field(
-        value,
-        &[
-            &["detail", "id_str"],
-            &["id"],
-        ],
-    )?;
+    let opus_id = extract_nested_scalar_field(value, &[&["detail", "id_str"], &["id"]])?;
     Some(format!("https://www.bilibili.com/opus/{opus_id}"))
 }
 
@@ -492,6 +490,9 @@ pub fn scan_roots(roots: &[PathBuf]) -> Result<ScanReport, BooruError> {
             let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else {
                 continue;
             };
+            if file_name == ALIAS_FILE_NAME {
+                continue;
+            }
             if !file_name.ends_with(".json") || file_name.ends_with(".booru.json") {
                 continue;
             }
@@ -583,10 +584,11 @@ fn read_json(path: &Path) -> Result<Value, BooruError> {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use serde_json::json;
 
-    use super::ImageItem;
+    use super::{scan_roots, ImageItem};
     use crate::metadata::BooruEdits;
 
     fn make_item(original: serde_json::Value) -> ImageItem {
@@ -629,7 +631,10 @@ mod tests {
             "category": "tumblr",
             "detail": "<div class=\"npf_row\"><figure class=\"tmblr-full\"><img src=\"https://example.com/image.png\"/></figure></div><p>2022.2.10</p><p>ゆるキャン△</p>"
         }));
-        assert_eq!(item.merged_detail().as_deref(), Some("2022.2.10\nゆるキャン△"));
+        assert_eq!(
+            item.merged_detail().as_deref(),
+            Some("2022.2.10\nゆるキャン△")
+        );
     }
 
     #[test]
@@ -755,5 +760,22 @@ mod tests {
             "tags_artist": ["myowa"]
         }));
         assert_eq!(item.merged_author().as_deref(), Some("myowa"));
+    }
+
+    #[test]
+    fn scan_roots_ignores_alias_json() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("lightbooru-scan-alias-{unique}"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("alias.json"), "[[\"a\", \"b\"]]").unwrap();
+
+        let report = scan_roots(std::slice::from_ref(&root)).expect("scan should succeed");
+        assert!(report.index.items.is_empty());
+        assert!(report.warnings.is_empty());
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

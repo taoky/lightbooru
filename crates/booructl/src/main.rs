@@ -6,9 +6,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use booru_core::{
-    apply_update_to_image, compute_hashes_with_cache, group_duplicates, metadata_path_for_image,
-    resolve_image_path, BooruConfig, EditUpdate, FuzzyHashAlgorithm, HashCache, ImageItem,
-    Library, ProgressObserver,
+    alias_path_for_root, apply_update_to_image, compute_hashes_with_cache,
+    expand_search_terms_with_aliases, group_duplicates, load_alias_groups_from_root,
+    load_alias_map_from_roots, merge_alias_terms, metadata_path_for_image, normalize_search_terms,
+    remove_alias_terms, resolve_image_path, save_alias_groups_to_root, BooruConfig, EditUpdate,
+    FuzzyHashAlgorithm, HashCache, ImageItem, Library, ProgressObserver,
 };
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
@@ -75,6 +77,11 @@ enum Commands {
         #[arg(long, default_value_t = 100)]
         limit: usize,
     },
+    /// Show or manage alias groups in alias.json
+    Alias {
+        #[command(subcommand)]
+        command: AliasCommands,
+    },
     /// Find perceptual-hash duplicates
     Dupes {
         #[arg(long, value_enum, default_value = "dhash")]
@@ -96,6 +103,16 @@ enum Commands {
         #[arg(long)]
         aot: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum AliasCommands {
+    /// Show alias groups
+    List,
+    /// Add terms into one alias group (and merge overlapping groups)
+    Add { terms: Vec<String> },
+    /// Remove terms from all alias groups
+    Remove { terms: Vec<String> },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -140,6 +157,7 @@ fn main() -> Result<()> {
             notes,
         ),
         Commands::Search { terms, limit } => search_command(&config, terms, limit, cli.quiet),
+        Commands::Alias { command } => alias_command(&config, command, cli.quiet),
         Commands::Dupes {
             algo,
             threshold,
@@ -463,17 +481,115 @@ fn search_command(
     if query_terms.is_empty() {
         return Err(anyhow!("no search terms provided"));
     }
+    let (alias_map, alias_warnings) = load_alias_map_from_roots(&config.roots);
+    if !quiet {
+        for warning in alias_warnings {
+            eprintln!("warning: {}: {}", warning.path.display(), warning.message);
+        }
+    }
+    let expanded_terms = expand_search_terms_with_aliases(query_terms, &alias_map);
 
     let mut results = library
         .index
         .iter()
-        .filter(|item| item_matches_search_terms(item, &query_terms))
+        .filter(|item| item_matches_search_terms(item, &expanded_terms))
         .collect::<Vec<_>>();
     results.sort_by_key(|item| item.image_path.clone());
     for item in results.into_iter().take(limit) {
         println!("{}", item.image_path.display());
     }
     Ok(())
+}
+
+fn alias_command(config: &BooruConfig, command: AliasCommands, quiet: bool) -> Result<()> {
+    match command {
+        AliasCommands::List => alias_list_command(config, quiet),
+        AliasCommands::Add { terms } => alias_add_command(config, terms),
+        AliasCommands::Remove { terms } => alias_remove_command(config, terms),
+    }
+}
+
+fn alias_list_command(config: &BooruConfig, quiet: bool) -> Result<()> {
+    let show_root = config.roots.len() > 1;
+    for (idx, root) in config.roots.iter().enumerate() {
+        if show_root {
+            if idx > 0 {
+                println!();
+            }
+            println!("Root: {}", root.display());
+        }
+
+        match load_alias_groups_from_root(root) {
+            Ok(groups) => {
+                if groups.is_empty() {
+                    println!("(none)");
+                } else {
+                    for group in groups {
+                        println!("{}", group.join(" | "));
+                    }
+                }
+            }
+            Err(err) => {
+                let path = alias_path_for_root(root);
+                if !quiet {
+                    eprintln!("warning: {}: {}", path.display(), err);
+                }
+                println!("(invalid alias file)");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn alias_add_command(config: &BooruConfig, terms: Vec<String>) -> Result<()> {
+    let root = alias_edit_root(config)?;
+    let terms = normalize_search_terms(terms);
+    if terms.len() < 2 {
+        return Err(anyhow!("alias add requires at least 2 non-empty terms"));
+    }
+
+    let path = alias_path_for_root(root);
+    let mut groups =
+        load_alias_groups_from_root(root).map_err(|err| anyhow!("{}: {}", path.display(), err))?;
+    let changed = merge_alias_terms(&mut groups, terms);
+    if changed {
+        save_alias_groups_to_root(root, &groups)
+            .map_err(|err| anyhow!("{}: {}", path.display(), err))?;
+        println!("Updated {}", path.display());
+    } else {
+        println!("No changes.");
+    }
+    Ok(())
+}
+
+fn alias_remove_command(config: &BooruConfig, terms: Vec<String>) -> Result<()> {
+    let root = alias_edit_root(config)?;
+    let terms = normalize_search_terms(terms);
+    if terms.is_empty() {
+        return Err(anyhow!("alias remove requires at least 1 non-empty term"));
+    }
+
+    let path = alias_path_for_root(root);
+    let mut groups =
+        load_alias_groups_from_root(root).map_err(|err| anyhow!("{}: {}", path.display(), err))?;
+    let changed = remove_alias_terms(&mut groups, terms);
+    if changed {
+        save_alias_groups_to_root(root, &groups)
+            .map_err(|err| anyhow!("{}: {}", path.display(), err))?;
+        println!("Updated {}", path.display());
+    } else {
+        println!("No changes.");
+    }
+    Ok(())
+}
+
+fn alias_edit_root(config: &BooruConfig) -> Result<&PathBuf> {
+    if config.roots.len() != 1 {
+        return Err(anyhow!(
+            "alias add/remove requires exactly one base root; pass a single --base"
+        ));
+    }
+    Ok(&config.roots[0])
 }
 
 fn dupes_command(
@@ -604,25 +720,17 @@ fn flatten_tag_args(tags: Vec<String>) -> Vec<String> {
     out
 }
 
-fn normalize_search_terms(terms: Vec<String>) -> Vec<String> {
-    terms
-        .into_iter()
-        .map(|term| term.trim().to_string())
-        .filter(|term| !term.is_empty())
-        .collect()
-}
-
 fn item_matches_search_terms(item: &ImageItem, terms: &[String]) -> bool {
     let tags = item
         .merged_tags()
         .into_iter()
-        .map(|tag| tag.to_ascii_lowercase())
+        .map(|tag| tag.to_lowercase())
         .collect::<Vec<_>>();
-    let author = item.merged_author().map(|author| author.to_ascii_lowercase());
-    let detail = item.merged_detail().map(|detail| detail.to_ascii_lowercase());
+    let author = item.merged_author().map(|author| author.to_lowercase());
+    let detail = item.merged_detail().map(|detail| detail.to_lowercase());
 
     terms.iter().any(|term| {
-        let needle = term.to_ascii_lowercase();
+        let needle = term.to_lowercase();
         tags.iter().any(|tag| tag.contains(&needle))
             || author
                 .as_ref()
@@ -761,7 +869,10 @@ mod tests {
 
         assert!(item_matches_search_terms(&item, &[String::from("garden")]));
         assert!(item_matches_search_terms(&item, &[String::from("painter")]));
-        assert!(item_matches_search_terms(&item, &[String::from("sunlight")]));
+        assert!(item_matches_search_terms(
+            &item,
+            &[String::from("sunlight")]
+        ));
     }
 
     #[test]
