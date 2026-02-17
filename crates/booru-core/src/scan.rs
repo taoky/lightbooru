@@ -95,7 +95,11 @@ pub struct Library {
 impl Library {
     pub fn scan(config: BooruConfig) -> Result<Self, BooruError> {
         let report = scan_roots(&config.roots)?;
-        Ok(Self { config, index: report.index, warnings: report.warnings })
+        Ok(Self {
+            config,
+            index: report.index,
+            warnings: report.warnings,
+        })
     }
 
     pub fn resolve_image_path(&self, input: &Path) -> PathBuf {
@@ -140,7 +144,10 @@ pub fn scan_roots(roots: &[PathBuf]) -> Result<ScanReport, BooruError> {
             let original = match read_json(path) {
                 Ok(value) => value,
                 Err(err) => {
-                    warnings.push(ScanWarning { path: path.to_path_buf(), message: format!("{err}") });
+                    warnings.push(ScanWarning {
+                        path: path.to_path_buf(),
+                        message: format!("{err}"),
+                    });
                     continue;
                 }
             };
@@ -199,6 +206,12 @@ pub fn load_item_for_image(image_path: &Path) -> Result<ImageItem, BooruError> {
 }
 
 fn read_json(path: &Path) -> Result<Value, BooruError> {
-    let data = fs::read(path).map_err(|source| BooruError::Io { path: path.to_path_buf(), source })?;
-    serde_json::from_slice(&data).map_err(|source| BooruError::Json { path: path.to_path_buf(), source })
+    let data = fs::read(path).map_err(|source| BooruError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    serde_json::from_slice(&data).map_err(|source| BooruError::Json {
+        path: path.to_path_buf(),
+        source,
+    })
 }

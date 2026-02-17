@@ -16,6 +16,7 @@ walkdir = "2"
 thiserror = "1"
 image = "0.24"
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 anyhow = "1"
 dirs = "5"
 imagehash = "0.3.0"

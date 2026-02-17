@@ -1,13 +1,23 @@
+use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use booru_core::{
     apply_update_to_image, compute_hashes_with_cache, group_duplicates, metadata_path_for_image,
-    resolve_image_path, BooruConfig, EditUpdate, FuzzyHashAlgorithm, HashCache, ProgressObserver, Library,
+    resolve_image_path, BooruConfig, EditUpdate, FuzzyHashAlgorithm, HashCache, Library,
+    ProgressObserver,
 };
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::engine::{
+    ArgValueCompleter, CompletionCandidate, PathCompleter, ValueCompleter,
+};
+use clap_complete::{generate, CompleteEnv, Shell};
 use indicatif::{ProgressBar, ProgressStyle};
+
+const COMPLETE_ENV_VAR: &str = "BOORUCTL_COMPLETE";
 
 #[derive(Parser)]
 #[command(name = "booructl", version, about = "CLI tools for LightBooru")]
@@ -28,6 +38,10 @@ struct Cli {
 enum Commands {
     /// Show merged metadata for an image
     Info {
+        #[arg(
+            value_hint = clap::ValueHint::AnyPath,
+            add = ArgValueCompleter::new(complete_image_path_with_base)
+        )]
         path: PathBuf,
         /// Print original metadata JSON
         #[arg(long)]
@@ -38,6 +52,10 @@ enum Commands {
     },
     /// Edit booru metadata for an image
     Edit {
+        #[arg(
+            value_hint = clap::ValueHint::AnyPath,
+            add = ArgValueCompleter::new(complete_image_path_with_base)
+        )]
         path: PathBuf,
         #[arg(long = "set-tag")]
         set_tags: Vec<String>,
@@ -74,6 +92,14 @@ enum Commands {
         #[arg(long)]
         cache: Option<PathBuf>,
     },
+    /// Generate shell completion script
+    Completion {
+        #[arg(value_enum)]
+        shell: Shell,
+        /// Generate static (AOT) completion script instead of dynamic registration
+        #[arg(long)]
+        aot: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -84,6 +110,10 @@ enum HashAlgo {
 }
 
 fn main() -> Result<()> {
+    CompleteEnv::with_factory(|| Cli::command())
+        .var(COMPLETE_ENV_VAR)
+        .complete();
+
     let cli = Cli::parse();
     let config = if cli.base.is_empty() {
         BooruConfig::default()
@@ -92,7 +122,11 @@ fn main() -> Result<()> {
     };
 
     match cli.command {
-        Commands::Info { path, original, booru } => info_command(&config, &path, original, booru, cli.quiet),
+        Commands::Info {
+            path,
+            original,
+            booru,
+        } => info_command(&config, &path, original, booru, cli.quiet),
         Commands::Edit {
             path,
             set_tags,
@@ -114,13 +148,179 @@ fn main() -> Result<()> {
             source,
         ),
         Commands::Search { tags, limit } => search_command(&config, tags, limit, cli.quiet),
-        Commands::Dupes { algo, threshold, no_cache, cache } => {
-            dupes_command(&config, algo, threshold, no_cache, cache, cli.quiet)
+        Commands::Dupes {
+            algo,
+            threshold,
+            no_cache,
+            cache,
+        } => dupes_command(&config, algo, threshold, no_cache, cache, cli.quiet),
+        Commands::Completion { shell, aot } => completion_command(shell, aot),
+    }
+}
+
+fn completion_command(shell: Shell, aot: bool) -> Result<()> {
+    if aot {
+        let mut cmd = Cli::command();
+        let name = cmd.get_name().to_string();
+        generate(shell, &mut cmd, name, &mut std::io::stdout());
+        return Ok(());
+    }
+
+    let current_dir = std::env::current_dir().ok();
+    let argv0 = std::env::args_os()
+        .next()
+        .unwrap_or_else(|| OsString::from("booructl"));
+    let args = vec![argv0, OsString::from("--")];
+    let shell_name = shell.to_string().to_ascii_lowercase();
+
+    std::env::set_var(COMPLETE_ENV_VAR, shell_name);
+    let completed = CompleteEnv::with_factory(|| Cli::command())
+        .var(COMPLETE_ENV_VAR)
+        .try_complete(args, current_dir.as_deref())?;
+    std::env::remove_var(COMPLETE_ENV_VAR);
+
+    if !completed {
+        return Err(anyhow!("failed to generate dynamic completion script"));
+    }
+    Ok(())
+}
+
+fn complete_image_path_with_base(current: &OsStr) -> Vec<CompletionCandidate> {
+    let fallback = || PathCompleter::any().complete(current);
+    let Some(current) = current.to_str() else {
+        return fallback();
+    };
+
+    // If the user explicitly types an absolute/relative prefix, fall back to shell-like completion.
+    if current.starts_with('/')
+        || current.starts_with("./")
+        || current.starts_with("../")
+        || current.starts_with('~')
+    {
+        return fallback();
+    }
+
+    let roots = completion_roots_from_env();
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for root in roots {
+        collect_relative_candidates(&root, current, &mut seen, &mut out);
+    }
+    if out.is_empty() {
+        fallback()
+    } else {
+        out.sort_by(|a, b| a.get_value().cmp(b.get_value()));
+        out
+    }
+}
+
+fn completion_roots_from_env() -> Vec<PathBuf> {
+    let words = completion_words_from_env();
+    let mut bases = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        let token = words[i].to_string_lossy();
+        if token == "--base" || token == "-b" {
+            if let Some(value) = words.get(i + 1) {
+                bases.push(PathBuf::from(value));
+                i += 2;
+                continue;
+            }
+            break;
+        }
+        if let Some(rest) = token.strip_prefix("--base=") {
+            if !rest.is_empty() {
+                bases.push(PathBuf::from(rest));
+            }
+            i += 1;
+            continue;
+        }
+        if token.len() > 2 && token.starts_with("-b") {
+            bases.push(PathBuf::from(&token[2..]));
+            i += 1;
+            continue;
+        }
+        i += 1;
+    }
+
+    if bases.is_empty() {
+        BooruConfig::default().roots
+    } else {
+        BooruConfig::with_roots(bases).roots
+    }
+}
+
+fn completion_words_from_env() -> Vec<OsString> {
+    let mut out = Vec::new();
+    let mut after_sep = false;
+    for arg in std::env::args_os().skip(1) {
+        if after_sep {
+            out.push(arg);
+            continue;
+        }
+        if arg.as_os_str() == OsStr::new("--") {
+            after_sep = true;
+        }
+    }
+    out
+}
+
+fn collect_relative_candidates(
+    root: &Path,
+    current: &str,
+    seen: &mut HashSet<OsString>,
+    out: &mut Vec<CompletionCandidate>,
+) {
+    let (parent, partial) = split_parent_and_partial(current);
+    let search_dir = if parent.is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(parent)
+    };
+    let Ok(entries) = fs::read_dir(search_dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if !name_str.starts_with(partial) {
+            continue;
+        }
+
+        let mut rel = if parent.is_empty() {
+            name_str.into_owned()
+        } else {
+            format!("{parent}/{name_str}")
+        };
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            rel.push('/');
+        }
+
+        let rel_os = OsString::from(&rel);
+        if seen.insert(rel_os.clone()) {
+            out.push(CompletionCandidate::new(rel_os));
         }
     }
 }
 
-fn info_command(config: &BooruConfig, path: &Path, original: bool, booru: bool, quiet: bool) -> Result<()> {
+fn split_parent_and_partial(current: &str) -> (&str, &str) {
+    if let Some(stripped) = current.strip_suffix('/') {
+        return (stripped, "");
+    }
+    if let Some((parent, partial)) = current.rsplit_once('/') {
+        return (parent, partial);
+    }
+    ("", current)
+}
+
+fn info_command(
+    config: &BooruConfig,
+    path: &Path,
+    original: bool,
+    booru: bool,
+    quiet: bool,
+) -> Result<()> {
     let library = scan_library(config, quiet)?;
     let image_path = resolve_image_path(path, &library.config.roots);
     let item = library
@@ -192,13 +392,19 @@ fn edit_command(
         source,
     };
 
-    let edits = apply_update_to_image(&image_path, update).context("failed to write booru edits")?;
+    let edits =
+        apply_update_to_image(&image_path, update).context("failed to write booru edits")?;
     println!("Updated: {}", image_path.display());
     println!("Booru edits: {}", serde_json::to_string_pretty(&edits)?);
     Ok(())
 }
 
-fn search_command(config: &BooruConfig, tags: Vec<String>, limit: usize, quiet: bool) -> Result<()> {
+fn search_command(
+    config: &BooruConfig,
+    tags: Vec<String>,
+    limit: usize,
+    quiet: bool,
+) -> Result<()> {
     let library = scan_library(config, quiet)?;
     let query_tags = flatten_tag_args(tags);
     if query_tags.is_empty() {

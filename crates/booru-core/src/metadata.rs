@@ -41,23 +41,35 @@ impl BooruEdits {
     pub fn load(path: &Path) -> Result<Option<Self>, BooruError> {
         match fs::read(path) {
             Ok(data) => {
-                let edits = serde_json::from_slice(&data)
-                    .map_err(|source| BooruError::Json { path: path.to_path_buf(), source })?;
+                let edits = serde_json::from_slice(&data).map_err(|source| BooruError::Json {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
                 Ok(Some(edits))
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(source) => Err(BooruError::Io { path: path.to_path_buf(), source }),
+            Err(source) => Err(BooruError::Io {
+                path: path.to_path_buf(),
+                source,
+            }),
         }
     }
 
     pub fn save(&self, path: &Path) -> Result<(), BooruError> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|source| BooruError::Io { path: parent.to_path_buf(), source })?;
+            fs::create_dir_all(parent).map_err(|source| BooruError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
         }
-        let data = serde_json::to_vec_pretty(self)
-            .map_err(|source| BooruError::Json { path: path.to_path_buf(), source })?;
-        fs::write(path, data).map_err(|source| BooruError::Io { path: path.to_path_buf(), source })
+        let data = serde_json::to_vec_pretty(self).map_err(|source| BooruError::Json {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        fs::write(path, data).map_err(|source| BooruError::Io {
+            path: path.to_path_buf(),
+            source,
+        })
     }
 
     pub fn apply_update(&mut self, update: EditUpdate) {

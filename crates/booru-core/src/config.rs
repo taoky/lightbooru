@@ -12,10 +12,7 @@ impl BooruConfig {
     }
 
     pub fn with_roots(roots: Vec<PathBuf>) -> Self {
-        let expanded = roots
-            .into_iter()
-            .map(|p| expand_tilde(&p))
-            .collect();
+        let expanded = roots.into_iter().map(|p| expand_tilde(&p)).collect();
         Self { roots: expanded }
     }
 }

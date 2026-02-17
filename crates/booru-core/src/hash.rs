@@ -66,14 +66,15 @@ pub struct FileFingerprint {
 
 impl FileFingerprint {
     pub fn from_path(path: &Path) -> Result<Self, BooruError> {
-        let meta = fs::metadata(path).map_err(|source| BooruError::Io { path: path.to_path_buf(), source })?;
+        let meta = fs::metadata(path).map_err(|source| BooruError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
         let size = meta.len() as i64;
-        let modified = meta
-            .modified()
-            .map_err(|err| BooruError::Io {
-                path: path.to_path_buf(),
-                source: std::io::Error::new(std::io::ErrorKind::Other, err),
-            })?;
+        let modified = meta.modified().map_err(|err| BooruError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(std::io::ErrorKind::Other, err),
+        })?;
         let mtime = modified
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -89,20 +90,28 @@ pub struct HashCache {
 
 impl HashCache {
     pub fn open_default() -> Result<Self, BooruError> {
-        let base = BaseDirectories::with_prefix("lightbooru")
-            .map_err(|err| BooruError::Cache { message: err.to_string() })?;
+        let base = BaseDirectories::with_prefix("lightbooru").map_err(|err| BooruError::Cache {
+            message: err.to_string(),
+        })?;
         let path = base
             .place_cache_file("hash_cache.sqlite")
-            .map_err(|err| BooruError::Cache { message: err.to_string() })?;
+            .map_err(|err| BooruError::Cache {
+                message: err.to_string(),
+            })?;
         Self::open(&path)
     }
 
     pub fn open(path: &Path) -> Result<Self, BooruError> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|source| BooruError::Io { path: parent.to_path_buf(), source })?;
+            fs::create_dir_all(parent).map_err(|source| BooruError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
         }
-        let conn = Connection::open(path).map_err(|source| BooruError::Database { path: path.to_path_buf(), source })?;
+        let conn = Connection::open(path).map_err(|source| BooruError::Database {
+            path: path.to_path_buf(),
+            source,
+        })?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
@@ -116,8 +125,14 @@ impl HashCache {
                  PRIMARY KEY(path, algo)
              );",
         )
-        .map_err(|source| BooruError::Database { path: path.to_path_buf(), source })?;
-        Ok(Self { conn, path: path.to_path_buf() })
+        .map_err(|source| BooruError::Database {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Ok(Self {
+            conn,
+            path: path.to_path_buf(),
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -132,17 +147,40 @@ impl HashCache {
     ) -> Result<Option<FuzzyHash>, BooruError> {
         let mut stmt = self
             .conn
-            .prepare("SELECT mtime, size, bits, bits_len FROM hash_cache WHERE path = ?1 AND algo = ?2")
-            .map_err(|source| BooruError::Database { path: self.path.clone(), source })?;
+            .prepare(
+                "SELECT mtime, size, bits, bits_len FROM hash_cache WHERE path = ?1 AND algo = ?2",
+            )
+            .map_err(|source| BooruError::Database {
+                path: self.path.clone(),
+                source,
+            })?;
         let mut rows = stmt
             .query(params![image_path.to_string_lossy(), algo as i32])
-            .map_err(|source| BooruError::Database { path: self.path.clone(), source })?;
-        if let Some(row) = rows.next().map_err(|source| BooruError::Database { path: self.path.clone(), source })? {
-            let mtime: i64 = row.get(0).map_err(|source| BooruError::Database { path: self.path.clone(), source })?;
-            let size: i64 = row.get(1).map_err(|source| BooruError::Database { path: self.path.clone(), source })?;
+            .map_err(|source| BooruError::Database {
+                path: self.path.clone(),
+                source,
+            })?;
+        if let Some(row) = rows.next().map_err(|source| BooruError::Database {
+            path: self.path.clone(),
+            source,
+        })? {
+            let mtime: i64 = row.get(0).map_err(|source| BooruError::Database {
+                path: self.path.clone(),
+                source,
+            })?;
+            let size: i64 = row.get(1).map_err(|source| BooruError::Database {
+                path: self.path.clone(),
+                source,
+            })?;
             if mtime == fingerprint.mtime && size == fingerprint.size {
-                let bits: Vec<u8> = row.get(2).map_err(|source| BooruError::Database { path: self.path.clone(), source })?;
-                let bits_len: i64 = row.get(3).map_err(|source| BooruError::Database { path: self.path.clone(), source })?;
+                let bits: Vec<u8> = row.get(2).map_err(|source| BooruError::Database {
+                    path: self.path.clone(),
+                    source,
+                })?;
+                let bits_len: i64 = row.get(3).map_err(|source| BooruError::Database {
+                    path: self.path.clone(),
+                    source,
+                })?;
                 let bits = unpack_bits(&bits, bits_len as usize);
                 return Ok(Some(FuzzyHash { algo, bits }));
             }
@@ -176,7 +214,10 @@ impl HashCache {
                     hash.bits.len() as i64
                 ],
             )
-            .map_err(|source| BooruError::Database { path: self.path.clone(), source })?;
+            .map_err(|source| BooruError::Database {
+                path: self.path.clone(),
+                source,
+            })?;
         Ok(())
     }
 }
@@ -187,7 +228,10 @@ pub struct HashComputation {
 }
 
 pub fn compute_fuzzy_hash(path: &Path, algo: FuzzyHashAlgorithm) -> Result<FuzzyHash, BooruError> {
-    let image = image::open(path).map_err(|source| BooruError::Image { path: path.to_path_buf(), source })?;
+    let image = image::open(path).map_err(|source| BooruError::Image {
+        path: path.to_path_buf(),
+        source,
+    })?;
     let bits = match algo {
         FuzzyHashAlgorithm::AHash => average_hash(&image).bits,
         FuzzyHashAlgorithm::DHash => difference_hash(&image).bits,
@@ -210,7 +254,10 @@ pub fn compute_hashes_with_cache(
         let fingerprint = if cache.is_some() {
             FileFingerprint::from_path(&item.image_path)
                 .map_err(|err| {
-                    warnings.push(DuplicateWarning { path: item.image_path.clone(), message: format!("{err}") });
+                    warnings.push(DuplicateWarning {
+                        path: item.image_path.clone(),
+                        message: format!("{err}"),
+                    });
                     err
                 })
                 .ok()
@@ -228,14 +275,22 @@ pub fn compute_hashes_with_cache(
                     continue;
                 }
                 Ok(None) => {}
-                Err(err) => warnings.push(DuplicateWarning { path: item.image_path.clone(), message: format!("{err}") }),
+                Err(err) => warnings.push(DuplicateWarning {
+                    path: item.image_path.clone(),
+                    message: format!("{err}"),
+                }),
             }
         }
         pending.push((idx, item.image_path.clone(), fingerprint));
     }
 
     let observer = progress;
-    let results: Vec<(usize, Result<FuzzyHash, BooruError>, Option<FileFingerprint>, PathBuf)> = pending
+    let results: Vec<(
+        usize,
+        Result<FuzzyHash, BooruError>,
+        Option<FileFingerprint>,
+        PathBuf,
+    )> = pending
         .par_iter()
         .map(|(idx, path, fingerprint)| {
             let result = compute_fuzzy_hash(path, algo);
@@ -249,14 +304,22 @@ pub fn compute_hashes_with_cache(
     for (idx, result, fingerprint, path) in results {
         match result {
             Ok(hash) => {
-                if let (Some(cache), Some(fingerprint)) = (cache.as_deref_mut(), fingerprint.as_ref()) {
+                if let (Some(cache), Some(fingerprint)) =
+                    (cache.as_deref_mut(), fingerprint.as_ref())
+                {
                     if let Err(err) = cache.store(&path, algo, fingerprint, &hash) {
-                        warnings.push(DuplicateWarning { path: path.clone(), message: format!("{err}") });
+                        warnings.push(DuplicateWarning {
+                            path: path.clone(),
+                            message: format!("{err}"),
+                        });
                     }
                 }
                 hashes.push((idx, hash));
             }
-            Err(err) => warnings.push(DuplicateWarning { path, message: format!("{err}") }),
+            Err(err) => warnings.push(DuplicateWarning {
+                path,
+                message: format!("{err}"),
+            }),
         }
     }
 
@@ -277,7 +340,9 @@ pub fn group_duplicates(
             for j in (i + 1)..hashes.len() {
                 let (idx_i, hash_i) = &hashes[i];
                 let (idx_j, hash_j) = &hashes[j];
-                if skip_same_dir && same_parent(&items[*idx_i].image_path, &items[*idx_j].image_path) {
+                if skip_same_dir
+                    && same_parent(&items[*idx_i].image_path, &items[*idx_j].image_path)
+                {
                     continue;
                 }
                 if hash_i.distance(hash_j) <= max_distance {
@@ -320,10 +385,17 @@ pub fn find_duplicates_with_cache(
 ) -> DuplicateReport {
     let computation = compute_hashes_with_cache(items, algo, cache, progress);
     let groups = group_duplicates(items, &computation.hashes, max_distance, skip_same_dir);
-    DuplicateReport { groups, warnings: computation.warnings }
+    DuplicateReport {
+        groups,
+        warnings: computation.warnings,
+    }
 }
 
-pub fn find_duplicates(items: &[ImageItem], algo: FuzzyHashAlgorithm, max_distance: u32) -> DuplicateReport {
+pub fn find_duplicates(
+    items: &[ImageItem],
+    algo: FuzzyHashAlgorithm,
+    max_distance: u32,
+) -> DuplicateReport {
     find_duplicates_with_cache(items, algo, max_distance, true, None, None)
 }
 
@@ -372,7 +444,10 @@ struct UnionFind {
 
 impl UnionFind {
     fn new(size: usize) -> Self {
-        Self { parent: (0..size).collect(), rank: vec![0; size] }
+        Self {
+            parent: (0..size).collect(),
+            rank: vec![0; size],
+        }
     }
 
     fn find(&mut self, x: usize) -> usize {

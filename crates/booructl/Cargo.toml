@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 clap.workspace = true
+clap_complete = { workspace = true, features = ["unstable-dynamic"] }
 anyhow.workspace = true
 serde_json.workspace = true
 indicatif.workspace = true
