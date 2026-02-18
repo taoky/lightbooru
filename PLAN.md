@@ -4,7 +4,7 @@
 Build a Rust project that provides a booru-like experience for gallery-dl downloads, with three UIs:
 - TUI (ratatui)
 - Web UI (no complex front-end framework)
-- GUI (gtk4-rs)
+- GUI (gtk4-rs + libadwaita)
 
 Primary data source:
 `~/Pictures/gallery-dl/<platform>/<id path>/xxx.jpg` and its `xxx.jpg.json` metadata.
@@ -41,7 +41,7 @@ High-value platform-specific metadata to preserve in raw extras:
 - **Ingest/index**: scan `~/Pictures/gallery-dl` (and configurable paths), parse metadata JSON, build an in-memory index on each startup (no DB).
 - **Edits storage**: write user edits to a new sidecar `xxx.jpg.booru.json`; never modify original `xxx.jpg.json`.
 - **Media access**: serve images and merged metadata (original + edits).
-- **UI crates**: TUI, Web (read-only), GTK4 reuse the core crate.
+- **UI crates**: TUI, Web (read-only), GTK4/libadwaita reuse the core crate.
 - **CLI**: `booructl` for inspect/edit/duplicate-finding.
 
 ## Steps
@@ -78,9 +78,41 @@ High-value platform-specific metadata to preserve in raw extras:
    - Bind to localhost only (no auth).
    - No metadata editing endpoints.
 
-7. **GTK4 GUI**
-   - Image grid + detail view with tag editor.
-   - Share state with core crate for query/edit.
+7. **GTK4/libadwaita GUI**
+   - Use Adwaita shell components:
+     - `adw::Application` + `adw::ApplicationWindow`
+     - `adw::ToolbarView` + `adw::HeaderBar` for title bar/buttons/search/actions
+     - `adw::ToastOverlay` for non-blocking status/error feedback
+   - Main content layout:
+     - Desktop-first: `gtk::Paned` (left browser + right detail editor)
+     - Optional responsive upgrade: `adw::NavigationSplitView` for narrow screens
+   - Left browser panel supports two modes on the same dataset:
+     - **List mode** (`gtk::ListView`) for dense text scanning
+     - **Thumbnail mode** (`gtk::GridView`) for visual browsing
+     - Switch by `adw::ViewStack` + `adw::ViewSwitcher` (or segmented toggle)
+   - Shared model strategy for list/grid:
+     - One data pipeline: `gio::ListStore -> gtk::FilterListModel -> gtk::SortListModel`
+     - One shared `gtk::SingleSelection` so both modes keep the same selected item
+     - Switching modes must preserve selection, filters, and sort state
+   - Right detail/editor panel:
+     - Metadata summary (title/author/date/source URL)
+     - Image preview (`gtk::Picture`)
+     - Editable fields: tags + sensitive flag; Save writes `*.booru.json`
+   - App architecture inside `booru-gtk`:
+     - `state`: app/query/filter/selection/view-mode state
+     - `services`: thin wrappers around `booru-core` (`scan/search/edit`)
+     - `widgets`: sidebar(list+grid), detail panel, filter bar, status/toast
+     - `actions/controller`: unidirectional event handling from UI to state updates
+   - Thumbnail loading:
+     - Asynchronous decode/resize to avoid UI stalls
+     - Memory cache first, optional disk thumbnail cache later
+     - Placeholder while loading/failing
+   - Milestones:
+     - M1: Adwaita shell + search/filter + list mode + detail binding
+     - M2: Add grid mode + mode switch + shared selection
+     - M3: Add async thumbnail loader/cache
+     - M4: Tag/sensitive editing with save + toast/error flow
+     - M5: UX polish (keyboard nav, scroll restore, responsive split behavior)
 
 8. **CLI (`booructl`)**
    - View image info and merged metadata.
