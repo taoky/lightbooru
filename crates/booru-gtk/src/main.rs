@@ -14,8 +14,8 @@ use booru_core::{
 };
 use clap::Parser;
 use gtk::{
-    self, Align, Box as GtkBox, Button, CheckButton, Label, ListBox, Orientation, Picture,
-    ScrolledWindow, SearchEntry, SelectionMode,
+    self, Align, Box as GtkBox, Button, Label, ListBox, Orientation, Picture, ScrolledWindow,
+    SearchEntry, SelectionMode,
 };
 
 #[derive(Parser, Debug)]
@@ -153,20 +153,32 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
     header.set_title_widget(Some(&window_title));
 
     let search = SearchEntry::new();
-    search.set_hexpand(true);
-    search.set_width_chars(28);
     search.set_placeholder_text(Some("Search tags/author/detail"));
-    header.pack_start(&search);
+    let search_bar = gtk::SearchBar::new();
+    search_bar.set_show_close_button(true);
+    search_bar.set_search_mode(false);
+    search_bar.connect_entry(&search);
+    search_bar.set_key_capture_widget(Some(&window));
+    search_bar.set_child(Some(&search));
 
-    let show_sensitive = CheckButton::with_label("Show sensitive");
-    show_sensitive.set_active(state.borrow().show_sensitive);
-    show_sensitive.set_valign(Align::Center);
+    let search_button = gtk::ToggleButton::builder()
+        .icon_name("system-search-symbolic")
+        .build();
+    search_button.add_css_class("flat");
+    search_button.set_tooltip_text(Some("Search"));
+    header.pack_start(&search_button);
 
-    let rescan_button = Button::with_label("Rescan");
-    rescan_button.add_css_class("flat");
-    header.pack_end(&rescan_button);
-    header.pack_end(&show_sensitive);
+    let main_menu = gtk::gio::Menu::new();
+    main_menu.append(Some("Show sensitive"), Some("win.show-sensitive"));
+    main_menu.append(Some("Rescan library"), Some("win.rescan"));
+    let menu_button = gtk::MenuButton::builder()
+        .icon_name("open-menu-symbolic")
+        .menu_model(&main_menu)
+        .build();
+    menu_button.set_tooltip_text(Some("Main menu"));
+    header.pack_end(&menu_button);
     toolbar.add_top_bar(&header);
+    toolbar.add_top_bar(&search_bar);
 
     let content = GtkBox::new(Orientation::Vertical, 0);
     content.set_vexpand(true);
@@ -300,6 +312,28 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
     rebuild_view(&state, &ui);
 
     {
+        let search_bar = search_bar.clone();
+        let search = search.clone();
+        search_button.connect_toggled(move |button| {
+            let enabled = button.is_active();
+            search_bar.set_search_mode(enabled);
+            if enabled {
+                search.grab_focus();
+            }
+        });
+    }
+
+    {
+        let search_button = search_button.clone();
+        search_bar.connect_search_mode_enabled_notify(move |bar| {
+            let enabled = bar.is_search_mode();
+            if search_button.is_active() != enabled {
+                search_button.set_active(enabled);
+            }
+        });
+    }
+
+    {
         let state_handle = state.clone();
         let ui = ui.clone();
         search.connect_search_changed(move |entry| {
@@ -314,13 +348,26 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
     {
         let state_handle = state.clone();
         let ui = ui.clone();
-        show_sensitive.connect_toggled(move |toggle| {
+        let show_sensitive_action = gtk::gio::SimpleAction::new_stateful(
+            "show-sensitive",
+            None,
+            &gtk::glib::Variant::from(state.borrow().show_sensitive),
+        );
+        show_sensitive_action.connect_activate(move |action, _| {
             let mut state = state_handle.borrow_mut();
-            state.show_sensitive = toggle.is_active();
+            state.show_sensitive = !state.show_sensitive;
             state.rebuild_filter();
+            let show_sensitive = state.show_sensitive;
             drop(state);
+            action.set_state(&gtk::glib::Variant::from(show_sensitive));
             rebuild_view(&state_handle, &ui);
+            if show_sensitive {
+                show_toast(&ui, "Showing sensitive items");
+            } else {
+                show_toast(&ui, "Hiding sensitive items");
+            }
         });
+        window.add_action(&show_sensitive_action);
     }
 
     {
@@ -351,12 +398,14 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
     {
         let state_handle = state.clone();
         let ui = ui.clone();
-        rescan_button.connect_clicked(move |_| {
+        let rescan_action = gtk::gio::SimpleAction::new("rescan", None);
+        rescan_action.connect_activate(move |_, _| {
             if let Err(err) = rescan_library(&state_handle, &ui) {
                 set_status(&ui, &format!("failed to rescan: {err}"));
                 show_banner(&ui, &format!("Failed to rescan library: {err}"));
             }
         });
+        window.add_action(&rescan_action);
     }
 
     window.present();
