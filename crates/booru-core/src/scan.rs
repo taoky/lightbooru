@@ -500,6 +500,15 @@ pub struct Library {
 pub struct SearchQuery {
     pub terms: Vec<String>,
     pub use_aliases: bool,
+    pub source_url: Option<String>,
+    pub sort: SearchSort,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SearchSort {
+    #[default]
+    IndexOrder,
+    FileNameAsc,
 }
 
 impl SearchQuery {
@@ -507,11 +516,25 @@ impl SearchQuery {
         Self {
             terms,
             use_aliases: false,
+            source_url: None,
+            sort: SearchSort::IndexOrder,
         }
     }
 
     pub fn with_aliases(mut self, use_aliases: bool) -> Self {
         self.use_aliases = use_aliases;
+        self
+    }
+
+    pub fn with_source_url(mut self, source_url: Option<String>) -> Self {
+        self.source_url = source_url
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        self
+    }
+
+    pub fn with_sort(mut self, sort: SearchSort) -> Self {
+        self.sort = sort;
         self
     }
 }
@@ -551,15 +574,39 @@ impl Library {
             (normalized_terms.clone(), Vec::new())
         };
 
-        let indices = self
+        let source_url = query.source_url.as_deref();
+        let mut indices = self
             .index
             .items
             .iter()
             .enumerate()
             .filter_map(|(idx, item)| {
-                item_matches_search_terms(item, &expanded_terms).then_some(idx)
+                (item_matches_search_terms(item, &expanded_terms)
+                    && item_matches_source_url(item, source_url))
+                .then_some(idx)
             })
-            .collect();
+            .collect::<Vec<_>>();
+
+        if query.sort == SearchSort::FileNameAsc {
+            indices.sort_by(|lhs, rhs| {
+                let left_item = &self.index.items[*lhs];
+                let right_item = &self.index.items[*rhs];
+                let left_name = left_item
+                    .image_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("");
+                let right_name = right_item
+                    .image_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("");
+
+                left_name
+                    .cmp(right_name)
+                    .then_with(|| left_item.image_path.cmp(&right_item.image_path))
+            });
+        }
 
         SearchResult {
             normalized_terms,
@@ -595,6 +642,17 @@ pub fn item_matches_search_terms(item: &ImageItem, terms: &[String]) -> bool {
                 .map(|detail| detail.contains(&needle))
                 .unwrap_or(false)
     })
+}
+
+fn item_matches_source_url(item: &ImageItem, source_url: Option<&str>) -> bool {
+    match source_url {
+        Some(needle) => item
+            .platform_url()
+            .as_deref()
+            .map(|url| url == needle)
+            .unwrap_or(false),
+        None => true,
+    }
 }
 
 pub fn scan_roots(roots: &[PathBuf]) -> Result<ScanReport, BooruError> {
@@ -716,13 +774,23 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{scan_roots, ImageItem, Index, Library, SearchQuery};
+    use super::{scan_roots, ImageItem, Index, Library, SearchQuery, SearchSort};
     use crate::config::BooruConfig;
     use crate::metadata::BooruEdits;
 
     fn make_item(original: serde_json::Value) -> ImageItem {
         ImageItem {
             image_path: PathBuf::new(),
+            meta_path: PathBuf::new(),
+            booru_path: PathBuf::new(),
+            original,
+            edits: BooruEdits::default(),
+        }
+    }
+
+    fn make_item_with_path(path: &str, original: serde_json::Value) -> ImageItem {
+        ImageItem {
+            image_path: PathBuf::from(path),
             meta_path: PathBuf::new(),
             booru_path: PathBuf::new(),
             original,
@@ -988,6 +1056,66 @@ mod tests {
         assert_eq!(result.expanded_terms, vec!["yurucamp".to_string()]);
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn library_search_filters_by_source_url() {
+        let mut index = Index::default();
+        index.items.push(make_item(json!({
+            "category": "misc",
+            "source_url": "https://example.com/a"
+        })));
+        index.items.push(make_item(json!({
+            "category": "misc",
+            "source_url": "https://example.com/b"
+        })));
+        index.items.push(make_item(json!({
+            "category": "misc"
+        })));
+
+        let library = Library {
+            config: BooruConfig::default(),
+            index,
+            warnings: Vec::new(),
+        };
+
+        let result = library.search(
+            SearchQuery::new(Vec::new()).with_source_url(Some("https://example.com/b".to_string())),
+        );
+        assert_eq!(result.indices, vec![1]);
+    }
+
+    #[test]
+    fn library_search_can_sort_by_file_name() {
+        let mut index = Index::default();
+        index.items.push(make_item_with_path(
+            "/tmp/zeta.jpg",
+            json!({
+                "category": "misc",
+            }),
+        ));
+        index.items.push(make_item_with_path(
+            "/tmp/alpha.jpg",
+            json!({
+                "category": "misc",
+            }),
+        ));
+        index.items.push(make_item_with_path(
+            "/tmp/alpha.png",
+            json!({
+                "category": "misc",
+            }),
+        ));
+
+        let library = Library {
+            config: BooruConfig::default(),
+            index,
+            warnings: Vec::new(),
+        };
+
+        let result =
+            library.search(SearchQuery::new(Vec::new()).with_sort(SearchSort::FileNameAsc));
+        assert_eq!(result.indices, vec![1, 2, 0]);
     }
 
     #[test]

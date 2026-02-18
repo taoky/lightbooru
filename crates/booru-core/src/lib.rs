@@ -28,5 +28,5 @@ pub use path::{
 };
 pub use scan::{
     item_matches_search_terms, scan_roots, ImageItem, Index, Library, ScanReport, ScanWarning,
-    SearchQuery, SearchResult,
+    SearchQuery, SearchResult, SearchSort,
 };

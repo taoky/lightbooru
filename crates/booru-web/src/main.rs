@@ -11,7 +11,7 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use booru_core::{BooruConfig, Library, SearchQuery};
+use booru_core::{BooruConfig, Library, SearchQuery, SearchSort};
 use clap::Parser;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -61,6 +61,7 @@ struct AppState {
 #[derive(Debug, Default, Deserialize)]
 struct IndexParams {
     q: Option<String>,
+    source: Option<String>,
     show_sensitive: Option<String>,
     limit: Option<usize>,
     page: Option<usize>,
@@ -93,6 +94,7 @@ struct TagLink {
 #[template(path = "index.html")]
 struct IndexTemplate {
     query: String,
+    source_filter: Option<String>,
     show_sensitive: bool,
     randomize: bool,
     seed: Option<u64>,
@@ -121,6 +123,7 @@ struct ItemTemplate {
     detail: String,
     sensitive: bool,
     platform_url: Option<String>,
+    source_search_href: Option<String>,
     tags: Vec<TagLink>,
     original_json: String,
     edits_json: String,
@@ -204,6 +207,10 @@ async fn index_handler(
 ) -> impl IntoResponse {
     let query = params.q.unwrap_or_default();
     let query_trimmed = query.trim().to_string();
+    let source_filter = params
+        .source
+        .map(|source| source.trim().to_string())
+        .filter(|source| !source.is_empty());
     let show_sensitive = params
         .show_sensitive
         .as_deref()
@@ -222,14 +229,16 @@ async fn index_handler(
         None
     };
 
-    let mut indices = if query_trimmed.is_empty() {
-        (0..state.library.index.items.len()).collect::<Vec<_>>()
-    } else {
-        state
-            .library
-            .search(SearchQuery::new(split_search_terms(&query_trimmed)).with_aliases(true))
-            .indices
-    };
+    let use_aliases = !query_trimmed.is_empty();
+    let mut indices = state
+        .library
+        .search(
+            SearchQuery::new(split_search_terms(&query_trimmed))
+                .with_aliases(use_aliases)
+                .with_source_url(source_filter.clone())
+                .with_sort(SearchSort::FileNameAsc),
+        )
+        .indices;
 
     if !show_sensitive {
         indices.retain(|idx| !state.library.index.items[*idx].merged_sensitive());
@@ -255,6 +264,7 @@ async fn index_handler(
     };
     let nav = IndexNav {
         query: query_trimmed.clone(),
+        source_url: source_filter.clone(),
         show_sensitive,
         randomize,
         seed,
@@ -278,6 +288,7 @@ async fn index_handler(
     let reshuffle_href = seed.map(|current_seed| {
         build_index_href(&IndexNav {
             query: query_trimmed.clone(),
+            source_url: source_filter.clone(),
             show_sensitive,
             randomize: true,
             seed: Some(next_seed(current_seed)),
@@ -288,6 +299,7 @@ async fn index_handler(
 
     HtmlTemplate(IndexTemplate {
         query: query_trimmed,
+        source_filter,
         show_sensitive,
         randomize,
         seed,
@@ -318,6 +330,10 @@ async fn item_handler(
         return (StatusCode::NOT_FOUND, "item not found").into_response();
     };
     let query_trimmed = params.q.unwrap_or_default().trim().to_string();
+    let source_filter = params
+        .source
+        .map(|source| source.trim().to_string())
+        .filter(|source| !source.is_empty());
     let show_sensitive = params
         .show_sensitive
         .as_deref()
@@ -333,6 +349,7 @@ async fn item_handler(
     let page = params.page.unwrap_or(1).max(1);
     let mut back_href = build_index_href(&IndexNav {
         query: query_trimmed,
+        source_url: source_filter,
         show_sensitive,
         randomize,
         seed,
@@ -352,6 +369,7 @@ async fn item_handler(
     }
     let tag_nav = IndexNav {
         query: String::new(),
+        source_url: None,
         show_sensitive,
         randomize,
         seed,
@@ -365,6 +383,10 @@ async fn item_handler(
     let original_json =
         serde_json::to_string_pretty(&item.original).unwrap_or_else(|_| "{}".to_string());
     let edits_json = serde_json::to_string_pretty(&item.edits).unwrap_or_else(|_| "{}".to_string());
+    let platform_url = item.platform_url();
+    let source_search_href = platform_url
+        .as_deref()
+        .and_then(|source| build_source_search_href(source, &tag_nav));
 
     HtmlTemplate(ItemTemplate {
         id,
@@ -379,7 +401,8 @@ async fn item_handler(
             .merged_detail()
             .unwrap_or_else(|| "(no description)".to_string()),
         sensitive: item.merged_sensitive(),
-        platform_url: item.platform_url(),
+        platform_url,
+        source_search_href,
         tags: item
             .merged_tags()
             .into_iter()
@@ -488,6 +511,7 @@ fn parse_truthy(value: &str) -> bool {
 #[derive(Clone, Debug)]
 struct IndexNav {
     query: String,
+    source_url: Option<String>,
     show_sensitive: bool,
     randomize: bool,
     seed: Option<u64>,
@@ -517,6 +541,11 @@ fn build_index_query_string(nav: &IndexNav) -> String {
     let mut pairs = Vec::new();
     if !nav.query.is_empty() {
         pairs.push(format!("q={}", urlencoding::encode(&nav.query)));
+    }
+    if let Some(source) = nav.source_url.as_deref() {
+        if !source.is_empty() {
+            pairs.push(format!("source={}", urlencoding::encode(source)));
+        }
     }
     if nav.show_sensitive {
         pairs.push("show_sensitive=1".to_string());
@@ -551,6 +580,7 @@ fn build_author_search_href(author: &str, nav: &IndexNav) -> Option<String> {
 fn build_term_search_href(term: &str, nav: &IndexNav) -> String {
     let tag_nav = IndexNav {
         query: term.to_string(),
+        source_url: None,
         show_sensitive: nav.show_sensitive,
         randomize: nav.randomize,
         seed: nav.seed,
@@ -558,6 +588,23 @@ fn build_term_search_href(term: &str, nav: &IndexNav) -> String {
         page: 1,
     };
     build_index_href(&tag_nav)
+}
+
+fn build_source_search_href(source: &str, nav: &IndexNav) -> Option<String> {
+    let trimmed = source.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let source_nav = IndexNav {
+        query: String::new(),
+        source_url: Some(trimmed.to_string()),
+        show_sensitive: nav.show_sensitive,
+        randomize: false,
+        seed: None,
+        limit: nav.limit,
+        page: 1,
+    };
+    Some(build_index_href(&source_nav))
 }
 
 fn generate_seed() -> u64 {

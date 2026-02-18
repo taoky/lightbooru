@@ -72,6 +72,19 @@
       color: var(--ink-soft);
       font-size: .95rem;
     }
+    .meta code {
+      font-family: "IBM Plex Mono", "JetBrains Mono", monospace;
+      font-size: .85rem;
+      background: #f8f0dc;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 1px 5px;
+    }
+    .meta a {
+      color: #0c5d66;
+      text-decoration: none;
+      font-weight: 600;
+    }
 
     .search {
       display: grid;
@@ -329,9 +342,19 @@
           · Randomized
           {% match seed %}{% when Some with (s) %}(seed {{ s }}){% when None %}{% endmatch %}
         {% endif %}
+        {% match source_filter %}
+          {% when Some with (source) %}
+            · Source filter <code>{{ source }}</code> · <a href="/">Clear</a>
+          {% when None %}
+        {% endmatch %}
       </p>
       <form class="search" method="get" action="/">
         <input type="hidden" name="page" value="1">
+        {% match source_filter %}
+          {% when Some with (source) %}
+            <input type="hidden" name="source" value="{{ source }}">
+          {% when None %}
+        {% endmatch %}
         <input type="text" name="q" value="{{ query }}" placeholder="Search tags / author / description">
         <label class="toggle">
           <input type="checkbox" name="show_sensitive" value="1" {% if show_sensitive %}checked{% endif %}>
@@ -400,6 +423,11 @@
                 <input type="hidden" name="q" value="{{ query }}">
                 <input type="hidden" name="limit" value="{{ limit }}">
                 <input type="hidden" name="page" value="{{ p }}">
+                {% match source_filter %}
+                  {% when Some with (source) %}
+                    <input type="hidden" name="source" value="{{ source }}">
+                  {% when None %}
+                {% endmatch %}
                 {% if show_sensitive %}<input type="hidden" name="show_sensitive" value="1">{% endif %}
                 {% if randomize %}
                   <input type="hidden" name="randomize" value="1">
@@ -418,6 +446,11 @@
                 <input type="hidden" name="q" value="{{ query }}">
                 <input type="hidden" name="limit" value="{{ limit }}">
                 <input type="hidden" name="page" value="{{ p }}">
+                {% match source_filter %}
+                  {% when Some with (source) %}
+                    <input type="hidden" name="source" value="{{ source }}">
+                  {% when None %}
+                {% endmatch %}
                 {% if show_sensitive %}<input type="hidden" name="show_sensitive" value="1">{% endif %}
                 {% if randomize %}
                   <input type="hidden" name="randomize" value="1">
@@ -433,6 +466,11 @@
           <form method="get" action="/">
             <input type="hidden" name="q" value="{{ query }}">
             <input type="hidden" name="limit" value="{{ limit }}">
+            {% match source_filter %}
+              {% when Some with (source) %}
+                <input type="hidden" name="source" value="{{ source }}">
+              {% when None %}
+            {% endmatch %}
             {% if show_sensitive %}<input type="hidden" name="show_sensitive" value="1">{% endif %}
             {% if randomize %}
               <input type="hidden" name="randomize" value="1">
@@ -486,7 +524,7 @@
       function buildQuickSearchHref(text) {
         const current = new URL(window.location.href);
         const target = new URL("/", window.location.origin);
-        ["show_sensitive", "randomize", "seed", "limit"].forEach(function (key) {
+        ["show_sensitive", "randomize", "seed", "limit", "source"].forEach(function (key) {
           const value = current.searchParams.get(key);
           if (value !== null && value !== "") {
             target.searchParams.set(key, value);

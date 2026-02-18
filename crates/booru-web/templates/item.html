@@ -152,6 +152,17 @@
 
     .meta-block { margin-bottom: 12px; }
     .meta-block a { color: #005f73; text-decoration: none; overflow-wrap: anywhere; }
+    .source-tools { margin-top: 8px; }
+    .source-search {
+      display: inline-block;
+      font-size: .78rem;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: #cdeee7;
+      color: #0d3b3f;
+      text-decoration: none;
+      font-weight: 600;
+    }
 
     .selection-search-tip {
       position: fixed;
@@ -258,6 +269,13 @@
           {% match platform_url %}
             {% when Some with (url) %}
               <a href="{{ url }}" target="_blank" rel="noreferrer">{{ url }}</a>
+              {% match source_search_href %}
+                {% when Some with (href) %}
+                  <div class="source-tools">
+                    <a class="source-search" href="{{ href }}">Search same source</a>
+                  </div>
+                {% when None %}
+              {% endmatch %}
             {% when None %}
               <span>(none)</span>
           {% endmatch %}
@@ -300,7 +318,7 @@
       function buildQuickSearchHref(text) {
         const current = new URL(window.location.href);
         const target = new URL("/", window.location.origin);
-        ["show_sensitive", "randomize", "seed", "limit"].forEach(function (key) {
+        ["show_sensitive", "randomize", "seed", "limit", "source"].forEach(function (key) {
           const value = current.searchParams.get(key);
           if (value !== null && value !== "") {
             target.searchParams.set(key, value);

@@ -4,7 +4,9 @@ use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use booru_core::{apply_update_to_image, BooruConfig, EditUpdate, Library, SearchQuery};
+use booru_core::{
+    apply_update_to_image, BooruConfig, EditUpdate, Library, SearchQuery, SearchSort,
+};
 use clap::Parser;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
@@ -109,6 +111,7 @@ struct App {
     mode: InputMode,
     focus: FocusPane,
     search_input: String,
+    source_filter: Option<String>,
     input_buffer: String,
     list_offset: usize,
     detail_scroll: u16,
@@ -132,13 +135,14 @@ impl App {
             mode: InputMode::Normal,
             focus: FocusPane::Images,
             search_input: String::new(),
+            source_filter: None,
             input_buffer: String::new(),
             list_offset: 0,
             detail_scroll: 0,
             detail_split_percent: 50,
             dragging_split: false,
             layout: LayoutInfo::default(),
-            status: String::from("Press ? for help. / search, t edit tags, q quit."),
+            status: String::from("Press ? for help. / search, t edit tags, u same-source, q quit."),
             preview: None,
             pending_sensitive_index: None,
         };
@@ -172,9 +176,12 @@ impl App {
     }
 
     fn rebuild_filter(&mut self) {
-        let search = self
-            .library
-            .search(SearchQuery::new(split_search_terms(&self.search_input)).with_aliases(true));
+        let search = self.library.search(
+            SearchQuery::new(split_search_terms(&self.search_input))
+                .with_aliases(true)
+                .with_source_url(self.source_filter.clone())
+                .with_sort(SearchSort::FileNameAsc),
+        );
         self.filtered_indices = search
             .indices
             .into_iter()
@@ -325,6 +332,37 @@ impl App {
             .with_context(|| format!("failed to run xdg-open for {}", image_path.display()))?;
         self.status = format!("Opened {}", image_path.display());
         Ok(())
+    }
+
+    fn filter_by_selected_source(&mut self) {
+        let Some(idx) = self.selected_item_index() else {
+            self.status = "No selected item.".to_string();
+            return;
+        };
+        let Some(source_url) = self.library.index.items[idx].platform_url() else {
+            self.status = "Selected item has no source URL.".to_string();
+            return;
+        };
+
+        self.source_filter = Some(source_url.clone());
+        self.rebuild_filter();
+        self.status = format!(
+            "Source filter applied: {} ({} result(s)). Press U to clear.",
+            truncate_middle(&source_url, 80),
+            self.filtered_indices.len()
+        );
+    }
+
+    fn clear_source_filter(&mut self) {
+        if self.source_filter.take().is_some() {
+            self.rebuild_filter();
+            self.status = format!(
+                "Source filter cleared ({} result(s)).",
+                self.filtered_indices.len()
+            );
+        } else {
+            self.status = "Source filter is not active.".to_string();
+        }
     }
 
     fn jump_to_random(&mut self) {
@@ -505,6 +543,19 @@ fn split_search_terms(input: &str) -> Vec<String> {
         .collect()
 }
 
+fn truncate_middle(input: &str, max_chars: usize) -> String {
+    let chars = input.chars().collect::<Vec<_>>();
+    if chars.len() <= max_chars || max_chars <= 6 {
+        return input.to_string();
+    }
+
+    let head_len = max_chars / 2 - 1;
+    let tail_len = max_chars - head_len - 3;
+    let head = chars[..head_len].iter().collect::<String>();
+    let tail = chars[chars.len() - tail_len..].iter().collect::<String>();
+    format!("{head}...{tail}")
+}
+
 fn load_image(path: &Path) -> Result<DynamicImage> {
     image::open(path).with_context(|| format!("unable to decode {}", path.display()))
 }
@@ -652,6 +703,8 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
             app.status =
                 "Tag mode: +tag add, -tag remove (space/comma separated), Enter apply".to_string();
         }
+        KeyCode::Char('u') => app.filter_by_selected_source(),
+        KeyCode::Char('U') => app.clear_source_filter(),
         KeyCode::Char('s') | KeyCode::Char('S') => {
             if let Err(err) = app.toggle_sensitive() {
                 app.status = err.to_string();
@@ -818,11 +871,15 @@ fn render_ui(frame: &mut Frame, app: &mut App) {
 }
 
 fn render_search_panel(frame: &mut Frame, area: Rect, app: &App) {
-    let label = match app.mode {
+    let mut label = match app.mode {
         InputMode::Search => format!("Search: {}_", app.input_buffer),
         InputMode::Tag => format!("Tag edit (+tag/-tag): {}_", app.input_buffer),
         InputMode::Normal | InputMode::ConfirmSensitive => format!("Search: {}", app.search_input),
     };
+    if let Some(source_url) = app.source_filter.as_deref() {
+        label.push_str(" | Source: ");
+        label.push_str(&truncate_middle(source_url, 60));
+    }
     let paragraph =
         Paragraph::new(label).block(Block::default().borders(Borders::ALL).title("Filter"));
     frame.render_widget(paragraph, area);
@@ -935,15 +992,22 @@ fn render_detail_and_preview(frame: &mut Frame, area: Rect, app: &mut App) {
     let (detail_text, image_path, preview_fallback) = {
         let item = &app.library.index.items[item_idx];
         let merged_tags = item.merged_tags();
+        let item_source = item.platform_url().unwrap_or_else(|| "(none)".to_string());
+        let active_source_filter = app
+            .source_filter
+            .as_deref()
+            .map(|value| truncate_middle(value, 96))
+            .unwrap_or_else(|| "(off)".to_string());
         let mut detail_text = format!(
-            "Path: {}\nAuthor: {}\nDate: {}\nSensitive: {}\nTags: {}\nNotes: {}\nURL: {}\n\nDetail:\n{}",
+            "Path: {}\nAuthor: {}\nDate: {}\nSensitive: {}\nTags: {}\nNotes: {}\nURL: {}\nSource filter: {}\nHint: u search same source, U clear source filter\n\nDetail:\n{}",
             item.image_path.display(),
             item.merged_author().unwrap_or_else(|| "(none)".to_string()),
             item.merged_date().unwrap_or_else(|| "(none)".to_string()),
             if item.merged_sensitive() { "yes" } else { "no" },
             format_tag_list(&merged_tags),
             item.edits.notes.as_deref().unwrap_or("(none)"),
-            item.platform_url().unwrap_or_else(|| "(none)".to_string()),
+            item_source,
+            active_source_filter,
             item.merged_detail().unwrap_or_else(|| "(none)".to_string())
         );
         if app.mode == InputMode::Tag {
@@ -1112,6 +1176,8 @@ fn render_help_dialog(frame: &mut Frame) {
         "  b                     Jump back from random history",
         "  /                     Search",
         "  t                     Edit tags (+tag / -tag)",
+        "  u                     Filter to same source URL",
+        "  U                     Clear source URL filter",
         "  s / S                 Toggle sensitive (mark-as-sensitive asks confirm)",
         "",
         "Sensitive filter:",
