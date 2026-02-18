@@ -13,5 +13,6 @@ clap.workspace = true
 mime_guess = "2"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+rand.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "signal"] }
 urlencoding = "2"

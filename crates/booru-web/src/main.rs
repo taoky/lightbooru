@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use askama::Template;
@@ -12,6 +13,9 @@ use axum::routing::get;
 use axum::Router;
 use booru_core::{BooruConfig, Library, SearchQuery};
 use clap::Parser;
+use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
+use rand::SeedableRng;
 use serde::Deserialize;
 use tokio::signal;
 
@@ -62,6 +66,8 @@ struct IndexParams {
     page: Option<usize>,
     from: Option<usize>,
     sy: Option<u32>,
+    randomize: Option<String>,
+    seed: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -87,6 +93,9 @@ struct TagLink {
 struct IndexTemplate {
     query: String,
     show_sensitive: bool,
+    randomize: bool,
+    seed: Option<u64>,
+    reshuffle_href: Option<String>,
     total_matches: usize,
     shown_count: usize,
     limit: usize,
@@ -198,8 +207,18 @@ async fn index_handler(
         .as_deref()
         .map(parse_truthy)
         .unwrap_or(state.default_show_sensitive);
+    let randomize = params
+        .randomize
+        .as_deref()
+        .map(parse_truthy)
+        .unwrap_or(true);
     let limit = params.limit.unwrap_or(state.default_limit).clamp(1, 1000);
     let requested_page = params.page.unwrap_or(1).max(1);
+    let seed = if randomize {
+        Some(params.seed.unwrap_or_else(generate_seed))
+    } else {
+        None
+    };
 
     let mut indices = if query_trimmed.is_empty() {
         (0..state.library.index.items.len()).collect::<Vec<_>>()
@@ -212,6 +231,10 @@ async fn index_handler(
 
     if !show_sensitive {
         indices.retain(|idx| !state.library.index.items[*idx].merged_sensitive());
+    }
+    if let Some(seed) = seed {
+        let mut rng = StdRng::seed_from_u64(seed);
+        indices.shuffle(&mut rng);
     }
 
     let total_matches = indices.len();
@@ -231,6 +254,8 @@ async fn index_handler(
     let nav = IndexNav {
         query: query_trimmed.clone(),
         show_sensitive,
+        randomize,
+        seed,
         limit,
         page,
     };
@@ -248,9 +273,23 @@ async fn index_handler(
         })
         .collect::<Vec<_>>();
 
+    let reshuffle_href = seed.map(|current_seed| {
+        build_index_href(&IndexNav {
+            query: query_trimmed.clone(),
+            show_sensitive,
+            randomize: true,
+            seed: Some(next_seed(current_seed)),
+            limit,
+            page: 1,
+        })
+    });
+
     HtmlTemplate(IndexTemplate {
         query: query_trimmed,
         show_sensitive,
+        randomize,
+        seed,
+        reshuffle_href,
         total_matches,
         shown_count: items.len(),
         limit,
@@ -282,11 +321,19 @@ async fn item_handler(
         .as_deref()
         .map(parse_truthy)
         .unwrap_or(state.default_show_sensitive);
+    let randomize = params
+        .randomize
+        .as_deref()
+        .map(parse_truthy)
+        .unwrap_or(true);
+    let seed = if randomize { params.seed } else { None };
     let limit = params.limit.unwrap_or(state.default_limit).clamp(1, 1000);
     let page = params.page.unwrap_or(1).max(1);
     let mut back_href = build_index_href(&IndexNav {
         query: query_trimmed,
         show_sensitive,
+        randomize,
+        seed,
         limit,
         page,
     });
@@ -304,6 +351,8 @@ async fn item_handler(
     let tag_nav = IndexNav {
         query: String::new(),
         show_sensitive,
+        randomize,
+        seed,
         limit,
         page: 1,
     };
@@ -434,6 +483,8 @@ fn parse_truthy(value: &str) -> bool {
 struct IndexNav {
     query: String,
     show_sensitive: bool,
+    randomize: bool,
+    seed: Option<u64>,
     limit: usize,
     page: usize,
 }
@@ -464,6 +515,16 @@ fn build_index_query_string(nav: &IndexNav) -> String {
     if nav.show_sensitive {
         pairs.push("show_sensitive=1".to_string());
     }
+    if nav.randomize {
+        pairs.push("randomize=1".to_string());
+    } else {
+        pairs.push("randomize=0".to_string());
+    }
+    if nav.randomize {
+        if let Some(seed) = nav.seed {
+            pairs.push(format!("seed={seed}"));
+        }
+    }
     pairs.push(format!("limit={}", nav.limit));
     pairs.push(format!("page={}", nav.page));
     pairs.join("&")
@@ -473,8 +534,22 @@ fn build_tag_search_href(tag: &str, nav: &IndexNav) -> String {
     let tag_nav = IndexNav {
         query: tag.to_string(),
         show_sensitive: nav.show_sensitive,
+        randomize: nav.randomize,
+        seed: nav.seed,
         limit: nav.limit,
         page: 1,
     };
     build_index_href(&tag_nav)
+}
+
+fn generate_seed() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+        ^ 0x9e37_79b9_7f4a_7c15
+}
+
+fn next_seed(seed: u64) -> u64 {
+    seed.wrapping_mul(6364136223846793005).wrapping_add(1)
 }

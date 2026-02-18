@@ -15,6 +15,7 @@
       --card: #fffcf2;
       --line: #d8cfb8;
       --shadow: rgba(16, 32, 34, 0.12);
+      --control-h: 42px;
     }
 
     * { box-sizing: border-box; }
@@ -43,10 +44,23 @@
       box-shadow: 0 10px 20px var(--shadow);
     }
 
+    .hero-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
     h1 {
       margin: 0 0 6px;
       font-size: clamp(1.4rem, 2.6vw, 2rem);
       letter-spacing: .01em;
+    }
+
+    .brand-link {
+      color: inherit;
+      text-decoration: none;
     }
 
     .meta {
@@ -57,7 +71,7 @@
 
     .search {
       display: grid;
-      grid-template-columns: 1fr auto auto auto;
+      grid-template-columns: 1fr auto auto auto auto;
       gap: 10px;
       align-items: center;
     }
@@ -65,7 +79,8 @@
     input[type="text"], input[type="number"] {
       border: 1px solid var(--line);
       border-radius: 10px;
-      padding: 10px 12px;
+      height: var(--control-h);
+      padding: 0 12px;
       background: #fffcf4;
       color: var(--ink);
       font-size: 1rem;
@@ -74,26 +89,55 @@
     button {
       border: 1px solid transparent;
       border-radius: 10px;
+      height: var(--control-h);
+      padding: 0 14px;
+      background: var(--accent);
+      color: #f7fffd;
+      cursor: pointer;
+      font-weight: 700;
+      letter-spacing: .01em;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    button:hover { background: #005963; }
+    .button-link {
+      border: 1px solid transparent;
+      border-radius: 10px;
       padding: 10px 14px;
       background: var(--accent);
       color: #f7fffd;
       cursor: pointer;
       font-weight: 700;
       letter-spacing: .01em;
+      text-decoration: none;
+      display: inline-block;
     }
 
-    button:hover { background: #005963; }
+    .button-link:hover { background: #005963; }
 
     .toggle {
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      padding: 8px 10px;
+      height: var(--control-h);
+      padding: 0 10px;
       border: 1px solid var(--line);
       border-radius: 10px;
       background: #fffcf4;
       color: var(--ink-soft);
       font-size: .92rem;
+      white-space: nowrap;
+    }
+
+    .toggle select {
+      height: 30px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 0 8px;
+      background: #fff9ef;
+      color: var(--ink);
     }
 
     .grid {
@@ -242,8 +286,21 @@
 <body>
   <main class="wrap">
     <section class="hero">
-      <h1>lightbooru web</h1>
-      <p class="meta">Showing {{ shown_count }} / {{ total_matches }} matches · Page {{ page }} / {{ total_pages }}</p>
+      <div class="hero-top">
+        <h1><a class="brand-link" href="/">lightbooru web</a></h1>
+        {% match reshuffle_href %}
+          {% when Some with (href) %}
+            <a class="button-link" href="{{ href }}">Reshuffle</a>
+          {% when None %}
+        {% endmatch %}
+      </div>
+      <p class="meta">
+        Showing {{ shown_count }} / {{ total_matches }} matches · Page {{ page }} / {{ total_pages }}
+        {% if randomize %}
+          · Randomized
+          {% match seed %}{% when Some with (s) %}(seed {{ s }}){% when None %}{% endmatch %}
+        {% endif %}
+      </p>
       <form class="search" method="get" action="/">
         <input type="hidden" name="page" value="1">
         <input type="text" name="q" value="{{ query }}" placeholder="Search tags / author / description">
@@ -251,6 +308,20 @@
           <input type="checkbox" name="show_sensitive" value="1" {% if show_sensitive %}checked{% endif %}>
           Show sensitive
         </label>
+        <label class="toggle">
+          Sort
+          <select name="randomize" aria-label="Sort mode">
+            <option value="1" {% if randomize %}selected{% endif %}>Random</option>
+            <option value="0" {% if !randomize %}selected{% endif %}>Original</option>
+          </select>
+        </label>
+        {% if randomize %}
+          {% match seed %}
+            {% when Some with (s) %}
+              <input type="hidden" name="seed" value="{{ s }}">
+            {% when None %}
+          {% endmatch %}
+        {% endif %}
         <input type="number" name="limit" min="1" max="1000" value="{{ limit }}" title="Max shown items">
         <button type="submit">Search</button>
       </form>
@@ -293,6 +364,12 @@
                 <input type="hidden" name="limit" value="{{ limit }}">
                 <input type="hidden" name="page" value="{{ p }}">
                 {% if show_sensitive %}<input type="hidden" name="show_sensitive" value="1">{% endif %}
+                {% if randomize %}
+                  <input type="hidden" name="randomize" value="1">
+                  {% match seed %}{% when Some with (s) %}<input type="hidden" name="seed" value="{{ s }}">{% when None %}{% endmatch %}
+                {% else %}
+                  <input type="hidden" name="randomize" value="0">
+                {% endif %}
                 <button type="submit">Prev</button>
               </form>
             {% when None %}
@@ -305,6 +382,12 @@
                 <input type="hidden" name="limit" value="{{ limit }}">
                 <input type="hidden" name="page" value="{{ p }}">
                 {% if show_sensitive %}<input type="hidden" name="show_sensitive" value="1">{% endif %}
+                {% if randomize %}
+                  <input type="hidden" name="randomize" value="1">
+                  {% match seed %}{% when Some with (s) %}<input type="hidden" name="seed" value="{{ s }}">{% when None %}{% endmatch %}
+                {% else %}
+                  <input type="hidden" name="randomize" value="0">
+                {% endif %}
                 <button type="submit">Next</button>
               </form>
             {% when None %}
@@ -314,6 +397,12 @@
             <input type="hidden" name="q" value="{{ query }}">
             <input type="hidden" name="limit" value="{{ limit }}">
             {% if show_sensitive %}<input type="hidden" name="show_sensitive" value="1">{% endif %}
+            {% if randomize %}
+              <input type="hidden" name="randomize" value="1">
+              {% match seed %}{% when Some with (s) %}<input type="hidden" name="seed" value="{{ s }}">{% when None %}{% endmatch %}
+            {% else %}
+              <input type="hidden" name="randomize" value="0">
+            {% endif %}
             <label class="toggle">Page <input type="number" name="page" min="1" max="{{ total_pages }}" value="{{ page }}"></label>
             <button type="submit">Go</button>
           </form>

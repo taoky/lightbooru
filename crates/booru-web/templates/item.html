@@ -57,6 +57,13 @@
       border-radius: 8px;
     }
 
+    .brand-home {
+      color: var(--ink);
+      text-decoration: none;
+      font-weight: 700;
+      letter-spacing: .01em;
+    }
+
     .main {
       display: grid;
       grid-template-columns: minmax(0, 1fr) 360px;
@@ -182,6 +189,7 @@
 <body>
   <main class="wrap">
     <header class="top">
+      <a class="brand-home" href="/">lightbooru web</a>
       <a class="back" href="{{ back_href }}">Back to gallery</a>
       <span>#{{ id }}</span>
     </header>
