@@ -195,8 +195,7 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
     split.set_show_content(true);
 
     let list = ListBox::new();
-    list.set_selection_mode(SelectionMode::None);
-    list.set_activate_on_single_click(true);
+    list.set_selection_mode(SelectionMode::Single);
     list.add_css_class("boxed-list");
     let list_scroll = ScrolledWindow::new();
     list_scroll.set_child(Some(&list));
@@ -374,10 +373,10 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
         let state_handle = state.clone();
         let ui = ui.clone();
         let list_handle = ui.list.clone();
-        list_handle.connect_row_activated(move |_list, row| {
+        list_handle.connect_row_selected(move |_list, row| {
             let mut state = state_handle.borrow_mut();
-            state.selected_pos = usize::try_from(row.index())
-                .ok()
+            state.selected_pos = row
+                .and_then(|row| usize::try_from(row.index()).ok())
                 .filter(|pos| *pos < state.filtered_indices.len());
             drop(state);
             refresh_detail(&state_handle, &ui);
@@ -421,30 +420,21 @@ fn refresh_list(state: &Rc<RefCell<AppState>>, ui: &Ui) {
         ui.list.remove(&child);
     }
 
-    let rows = {
+    let (rows, selected_pos) = {
         let state = state.borrow();
-        state
+        let rows = state
             .filtered_indices
             .iter()
-            .enumerate()
-            .map(|idx| {
-                let (pos, item_idx) = idx;
+            .map(|item_idx| {
                 let item = &state.library.index.items[*item_idx];
                 let title = infer_title(item);
                 let author = item.merged_author().unwrap_or_else(|| "-".to_string());
                 let date = item.merged_date().unwrap_or_else(|| "-".to_string());
                 let prefix = if item.merged_sensitive() { "[S] " } else { "" };
-                let current = if state.selected_pos == Some(pos) {
-                    "› "
-                } else {
-                    "  "
-                };
-                (
-                    format!("{current}{prefix}{title}"),
-                    format!("{author} | {date}"),
-                )
+                (format!("{prefix}{title}"), format!("{author} | {date}"))
             })
-            .collect::<Vec<(String, String)>>()
+            .collect::<Vec<(String, String)>>();
+        (rows, state.selected_pos)
     };
 
     for (title, subtitle) in rows {
@@ -453,8 +443,13 @@ fn refresh_list(state: &Rc<RefCell<AppState>>, ui: &Ui) {
             .subtitle(subtitle)
             .activatable(true)
             .build();
-        row.set_selectable(false);
         ui.list.append(&row);
+    }
+
+    if let Some(pos) = selected_pos {
+        if let Some(row) = ui.list.row_at_index(pos as i32) {
+            ui.list.select_row(Some(&row));
+        }
     }
 }
 
