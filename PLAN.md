@@ -79,40 +79,52 @@ High-value platform-specific metadata to preserve in raw extras:
    - No metadata editing endpoints.
 
 7. **GTK4/libadwaita GUI**
-   - Use Adwaita shell components:
+   - Use an Adwaita-first app shell and responsive navigation:
      - `adw::Application` + `adw::ApplicationWindow`
      - `adw::ToolbarView` + `adw::HeaderBar` for title bar/buttons/search/actions
-     - `adw::ToastOverlay` for non-blocking status/error feedback
-   - Main content layout:
-     - Desktop-first: `gtk::Paned` (left browser + right detail editor)
-     - Optional responsive upgrade: `adw::NavigationSplitView` for narrow screens
+     - `adw::NavigationSplitView` as the primary layout (browser + detail/editor)
+     - `adw::Breakpoint` rules to collapse/expand navigation on narrow screens
+   - View switching and mode presentation:
+     - `adw::ViewStack` for list/grid pages on the same dataset
+     - `adw::ViewSwitcherTitle` for wide layouts
+     - `adw::ViewSwitcherBar` for narrow layouts
    - Left browser panel supports two modes on the same dataset:
      - **List mode** (`gtk::ListView`) for dense text scanning
      - **Thumbnail mode** (`gtk::GridView`) for visual browsing
-     - Switch by `adw::ViewStack` + `adw::ViewSwitcher` (or segmented toggle)
    - Shared model strategy for list/grid:
      - One data pipeline: `gio::ListStore -> gtk::FilterListModel -> gtk::SortListModel`
      - One shared `gtk::SingleSelection` so both modes keep the same selected item
      - Switching modes must preserve selection, filters, and sort state
-   - Right detail/editor panel:
+   - Right detail/editor panel follows Adwaita preferences patterns:
      - Metadata summary (title/author/date/source URL)
      - Image preview (`gtk::Picture`)
-     - Editable fields: tags + sensitive flag; Save writes `*.booru.json`
+     - Wrap editor content with `adw::Clamp` for readable width
+     - `adw::PreferencesPage` + `adw::PreferencesGroup` for metadata/edit sections
+     - `adw::EntryRow` for tags/notes and `adw::SwitchRow` for sensitive flag
+     - Save writes `*.booru.json`
+   - Feedback and state surfaces:
+     - `adw::StatusPage` for empty/loading/error views
+     - `adw::Banner` for recoverable errors/warnings
+     - `adw::ToastOverlay` for non-blocking status feedback
    - App architecture inside `booru-gtk`:
      - `state`: app/query/filter/selection/view-mode state
      - `services`: thin wrappers around `booru-core` (`scan/search/edit`)
-     - `widgets`: sidebar(list+grid), detail panel, filter bar, status/toast
+     - `widgets`: sidebar(list+grid), detail panel, filter bar, status surfaces
      - `actions/controller`: unidirectional event handling from UI to state updates
+   - Visual style policy:
+     - Follow system light/dark mode and accent colors
+     - Prefer built-in Adwaita widgets/style classes; avoid heavy custom CSS
    - Thumbnail loading:
      - Asynchronous decode/resize to avoid UI stalls
      - Memory cache first, optional disk thumbnail cache later
      - Placeholder while loading/failing
    - Milestones:
-     - M1: Adwaita shell + search/filter + list mode + detail binding
-     - M2: Add grid mode + mode switch + shared selection
-     - M3: Add async thumbnail loader/cache
-     - M4: Tag/sensitive editing with save + toast/error flow
-     - M5: UX polish (keyboard nav, scroll restore, responsive split behavior)
+     - M1: Adwaita shell + responsive split + status-page scaffold
+     - M2: Search/filter + list mode + detail binding
+     - M3: Add grid mode + mode switch + shared selection
+     - M4: Add async thumbnail loader/cache + placeholders
+     - M5: Tag/sensitive editing with save + toast/banner error flow
+     - M6: Adwaita polish (keyboard nav, shortcuts, scroll restore, accessibility)
 
 8. **CLI (`booructl`)**
    - View image info and merged metadata.
