@@ -3,15 +3,19 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use adw::{Application, ApplicationWindow};
+use adw::{
+    ActionRow, Application, ApplicationWindow, Banner, Clamp, EntryRow, HeaderBar, NavigationPage,
+    NavigationSplitView, StatusPage, SwitchRow, Toast, ToastOverlay, ToolbarView, ViewStack,
+    WindowTitle,
+};
 use anyhow::Result;
 use booru_core::{
     apply_update_to_image, BooruConfig, EditUpdate, Library, SearchQuery, SearchSort,
 };
 use clap::Parser;
 use gtk::{
-    self, Align, Box as GtkBox, Button, CheckButton, Entry, Label, ListBox, ListBoxRow,
-    Orientation, Paned, Picture, ScrolledWindow, SearchEntry, SelectionMode,
+    self, Align, Box as GtkBox, Button, CheckButton, Label, ListBox, Orientation, Picture,
+    ScrolledWindow, SearchEntry, SelectionMode,
 };
 
 #[derive(Parser, Debug)]
@@ -89,9 +93,12 @@ struct Ui {
     author: Label,
     date: Label,
     detail: Label,
-    tags: Entry,
-    item_sensitive: CheckButton,
+    tags: EntryRow,
+    item_sensitive: SwitchRow,
     status: Label,
+    detail_stack: ViewStack,
+    toast_overlay: ToastOverlay,
+    banner: Banner,
 }
 
 fn main() -> Result<()> {
@@ -137,46 +144,66 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
         .default_height(800)
         .build();
 
-    let root = GtkBox::new(Orientation::Vertical, 8);
-    root.set_margin_start(8);
-    root.set_margin_end(8);
-    root.set_margin_top(8);
-    root.set_margin_bottom(8);
+    let toast_overlay = ToastOverlay::new();
+    let toolbar = ToolbarView::new();
+    toast_overlay.set_child(Some(&toolbar));
 
-    let controls = GtkBox::new(Orientation::Horizontal, 8);
+    let header = HeaderBar::new();
+    let window_title = WindowTitle::new("lightbooru", "gallery-dl local library");
+    header.set_title_widget(Some(&window_title));
+
     let search = SearchEntry::new();
     search.set_hexpand(true);
+    search.set_width_chars(28);
     search.set_placeholder_text(Some("Search tags/author/detail"));
+    header.pack_start(&search);
 
     let show_sensitive = CheckButton::with_label("Show sensitive");
     show_sensitive.set_active(state.borrow().show_sensitive);
+    show_sensitive.set_valign(Align::Center);
 
     let rescan_button = Button::with_label("Rescan");
+    rescan_button.add_css_class("flat");
+    header.pack_end(&rescan_button);
+    header.pack_end(&show_sensitive);
+    toolbar.add_top_bar(&header);
 
-    controls.append(&search);
-    controls.append(&show_sensitive);
-    controls.append(&rescan_button);
+    let content = GtkBox::new(Orientation::Vertical, 0);
+    content.set_vexpand(true);
+    let banner = Banner::new("");
+    banner.set_revealed(false);
+    content.append(&banner);
 
-    let paned = Paned::new(Orientation::Horizontal);
+    let split = NavigationSplitView::new();
+    split.set_hexpand(true);
+    split.set_vexpand(true);
+    split.set_min_sidebar_width(280.0);
+    split.set_max_sidebar_width(440.0);
+    split.set_sidebar_width_fraction(0.32);
+    split.set_show_content(true);
 
     let list = ListBox::new();
-    list.set_selection_mode(SelectionMode::Single);
+    list.set_selection_mode(SelectionMode::None);
+    list.set_activate_on_single_click(true);
+    list.add_css_class("boxed-list");
     let list_scroll = ScrolledWindow::new();
     list_scroll.set_child(Some(&list));
     list_scroll.set_hexpand(true);
     list_scroll.set_vexpand(true);
-    paned.set_start_child(Some(&list_scroll));
+    list_scroll.add_css_class("navigation-sidebar");
+    let sidebar_page = NavigationPage::new(&list_scroll, "Library");
+    split.set_sidebar(Some(&sidebar_page));
 
-    let detail_wrap = GtkBox::new(Orientation::Vertical, 8);
-    detail_wrap.set_margin_start(8);
-    detail_wrap.set_margin_end(8);
-    detail_wrap.set_margin_top(8);
-    detail_wrap.set_margin_bottom(8);
+    let detail_wrap = GtkBox::new(Orientation::Vertical, 12);
+    detail_wrap.set_margin_start(12);
+    detail_wrap.set_margin_end(12);
+    detail_wrap.set_margin_top(12);
+    detail_wrap.set_margin_bottom(12);
 
     let title = Label::new(None);
     title.set_xalign(0.0);
     title.set_wrap(true);
-    title.add_css_class("title-3");
+    title.add_css_class("title-2");
 
     let author = Label::new(None);
     author.set_xalign(0.0);
@@ -190,42 +217,70 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
     picture.set_can_shrink(true);
     picture.set_halign(Align::Fill);
     picture.set_valign(Align::Fill);
+    picture.set_content_fit(gtk::ContentFit::Contain);
 
     let detail = Label::new(None);
     detail.set_xalign(0.0);
     detail.set_wrap(true);
     detail.set_selectable(true);
 
-    let tags = Entry::new();
-    tags.set_placeholder_text(Some("Tags (space/comma separated)"));
+    let tags = EntryRow::builder().title("Tags").build();
 
-    let item_sensitive = CheckButton::with_label("Sensitive");
+    let item_sensitive = SwitchRow::builder().title("Sensitive").build();
+    let edit_group = adw::PreferencesGroup::builder()
+        .title("Edits")
+        .description("Saved to *.booru.json")
+        .build();
+    edit_group.add(&tags);
+    edit_group.add(&item_sensitive);
+
     let save_button = Button::with_label("Save");
+    save_button.set_halign(Align::End);
+    save_button.add_css_class("suggested-action");
 
     detail_wrap.append(&title);
     detail_wrap.append(&author);
     detail_wrap.append(&date);
     detail_wrap.append(&picture);
     detail_wrap.append(&detail);
-    detail_wrap.append(&tags);
-    detail_wrap.append(&item_sensitive);
+    detail_wrap.append(&edit_group);
     detail_wrap.append(&save_button);
 
     let detail_scroll = ScrolledWindow::new();
-    detail_scroll.set_child(Some(&detail_wrap));
+    let detail_clamp = Clamp::new();
+    detail_clamp.set_maximum_size(960);
+    detail_clamp.set_tightening_threshold(560);
+    detail_clamp.set_child(Some(&detail_wrap));
+    detail_scroll.set_child(Some(&detail_clamp));
     detail_scroll.set_hexpand(true);
     detail_scroll.set_vexpand(true);
-    paned.set_end_child(Some(&detail_scroll));
+
+    let empty_page = StatusPage::new();
+    empty_page.set_icon_name(Some("image-x-generic-symbolic"));
+    empty_page.set_title("No item selected");
+    empty_page.set_description(Some(
+        "Select an item from the left panel to preview and edit metadata.",
+    ));
+
+    let detail_stack = ViewStack::new();
+    detail_stack.set_hhomogeneous(false);
+    detail_stack.set_vhomogeneous(false);
+    detail_stack.add_titled(&detail_scroll, Some("detail"), "Detail");
+    detail_stack.add_titled(&empty_page, Some("empty"), "Empty");
+    detail_stack.set_visible_child_name("empty");
+
+    let detail_page = NavigationPage::new(&detail_stack, "Details");
+    split.set_content(Some(&detail_page));
 
     let status = Label::new(None);
     status.set_xalign(0.0);
     status.set_wrap(true);
+    status.add_css_class("dim-label");
+    detail_wrap.append(&status);
 
-    root.append(&controls);
-    root.append(&paned);
-    root.append(&status);
-
-    window.set_content(Some(&root));
+    content.append(&split);
+    toolbar.set_content(Some(&content));
+    window.set_content(Some(&toast_overlay));
 
     let ui = Ui {
         list,
@@ -237,6 +292,9 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
         tags,
         item_sensitive,
         status,
+        detail_stack,
+        toast_overlay,
+        banner,
     };
 
     rebuild_view(&state, &ui);
@@ -269,10 +327,10 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
         let state_handle = state.clone();
         let ui = ui.clone();
         let list_handle = ui.list.clone();
-        list_handle.connect_row_selected(move |_list, row| {
+        list_handle.connect_row_activated(move |_list, row| {
             let mut state = state_handle.borrow_mut();
-            state.selected_pos = row
-                .and_then(|r| usize::try_from(r.index()).ok())
+            state.selected_pos = usize::try_from(row.index())
+                .ok()
                 .filter(|pos| *pos < state.filtered_indices.len());
             drop(state);
             refresh_detail(&state_handle, &ui);
@@ -285,6 +343,7 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
         save_button.connect_clicked(move |_| {
             if let Err(err) = save_selected_edits(&state_handle, &ui) {
                 set_status(&ui, &format!("failed to save: {err}"));
+                show_banner(&ui, &format!("Failed to save edits: {err}"));
             }
         });
     }
@@ -295,6 +354,7 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
         rescan_button.connect_clicked(move |_| {
             if let Err(err) = rescan_library(&state_handle, &ui) {
                 set_status(&ui, &format!("failed to rescan: {err}"));
+                show_banner(&ui, &format!("Failed to rescan library: {err}"));
             }
         });
     }
@@ -312,36 +372,40 @@ fn refresh_list(state: &Rc<RefCell<AppState>>, ui: &Ui) {
         ui.list.remove(&child);
     }
 
-    let (rows, selected_pos) = {
+    let rows = {
         let state = state.borrow();
-        let rows = state
+        state
             .filtered_indices
             .iter()
+            .enumerate()
             .map(|idx| {
-                let item = &state.library.index.items[*idx];
+                let (pos, item_idx) = idx;
+                let item = &state.library.index.items[*item_idx];
                 let title = infer_title(item);
                 let author = item.merged_author().unwrap_or_else(|| "-".to_string());
                 let date = item.merged_date().unwrap_or_else(|| "-".to_string());
                 let prefix = if item.merged_sensitive() { "[S] " } else { "" };
-                format!("{prefix}{title} | {author} | {date}")
+                let current = if state.selected_pos == Some(pos) {
+                    "› "
+                } else {
+                    "  "
+                };
+                (
+                    format!("{current}{prefix}{title}"),
+                    format!("{author} | {date}"),
+                )
             })
-            .collect::<Vec<_>>();
-        (rows, state.selected_pos)
+            .collect::<Vec<(String, String)>>()
     };
 
-    for row_text in rows {
-        let row = ListBoxRow::new();
-        let label = Label::new(Some(&row_text));
-        label.set_xalign(0.0);
-        label.set_wrap(true);
-        row.set_child(Some(&label));
+    for (title, subtitle) in rows {
+        let row = ActionRow::builder()
+            .title(title)
+            .subtitle(subtitle)
+            .activatable(true)
+            .build();
+        row.set_selectable(false);
         ui.list.append(&row);
-    }
-
-    if let Some(pos) = selected_pos {
-        if let Some(row) = ui.list.row_at_index(pos as i32) {
-            ui.list.select_row(Some(&row));
-        }
     }
 }
 
@@ -364,12 +428,14 @@ fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
         )
     };
 
+    ui.detail_stack.set_visible_child_name("detail");
     ui.title.set_text(&snapshot.2);
     ui.author.set_text(&format!("Author: {}", snapshot.3));
     ui.date.set_text(&format!("Date: {}", snapshot.4));
     ui.detail.set_text(&snapshot.5);
     ui.tags.set_text(&snapshot.6);
     ui.item_sensitive.set_active(snapshot.7);
+    hide_banner(ui);
 
     match gtk::gdk::Texture::from_filename(&snapshot.1) {
         Ok(texture) => {
@@ -398,6 +464,7 @@ fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
 }
 
 fn clear_detail(ui: &Ui) {
+    ui.detail_stack.set_visible_child_name("empty");
     ui.title.set_text("(no match)");
     ui.author.set_text("");
     ui.date.set_text("");
@@ -445,6 +512,8 @@ fn save_selected_edits(state: &Rc<RefCell<AppState>>, ui: &Ui) -> Result<()> {
 
     rebuild_view(state, ui);
     set_status(ui, &format!("Saved edits: {}", image_path.display()));
+    show_toast(ui, "Edits saved");
+    hide_banner(ui);
     Ok(())
 }
 
@@ -461,6 +530,8 @@ fn rescan_library(state: &Rc<RefCell<AppState>>, ui: &Ui) -> Result<()> {
     }
     rebuild_view(state, ui);
     set_status(ui, "Rescan complete.");
+    show_toast(ui, "Rescan complete");
+    hide_banner(ui);
     Ok(())
 }
 
@@ -494,4 +565,19 @@ fn infer_title(item: &booru_core::ImageItem) -> String {
 
 fn set_status(ui: &Ui, message: &str) {
     ui.status.set_text(message);
+}
+
+fn show_toast(ui: &Ui, message: &str) {
+    let toast = Toast::new(message);
+    toast.set_timeout(2);
+    ui.toast_overlay.add_toast(toast);
+}
+
+fn show_banner(ui: &Ui, message: &str) {
+    ui.banner.set_title(message);
+    ui.banner.set_revealed(true);
+}
+
+fn hide_banner(ui: &Ui) {
+    ui.banner.set_revealed(false);
 }
