@@ -55,10 +55,6 @@ impl Preview {
         }
     }
 
-    fn protocol_label(&self) -> String {
-        format!("{:?}", self.picker.protocol_type())
-    }
-
     fn load_for_path(&mut self, path: &Path) {
         if self.current_path.as_deref() == Some(path) {
             return;
@@ -111,11 +107,7 @@ impl App {
             let path = self.library.index.items[idx].image_path.clone();
             preview.load_for_path(&path);
         }
-        self.status = format!(
-            "{} | preview protocol {}",
-            self.status,
-            preview.protocol_label()
-        );
+        self.status = format!("{}", self.status);
         self.preview = Some(preview);
     }
 
@@ -407,7 +399,7 @@ fn render_ui(frame: &mut Frame, app: &mut App) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(8),
-            Constraint::Length(2),
+            Constraint::Length(3),
         ])
         .split(frame.area());
 
@@ -534,11 +526,7 @@ fn render_preview_panel(
     image_path: Option<PathBuf>,
     fallback: String,
 ) {
-    let title = app
-        .preview
-        .as_ref()
-        .map(|preview| format!("Preview ({})", preview.protocol_label()))
-        .unwrap_or_else(|| "Preview".to_string());
+    let title = "Preview";
     let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
