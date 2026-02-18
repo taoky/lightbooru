@@ -101,6 +101,7 @@ struct App {
     focus: FocusPane,
     search_input: String,
     input_buffer: String,
+    list_offset: usize,
     detail_scroll: u16,
     detail_split_percent: u16,
     dragging_split: bool,
@@ -119,6 +120,7 @@ impl App {
             focus: FocusPane::Images,
             search_input: String::new(),
             input_buffer: String::new(),
+            list_offset: 0,
             detail_scroll: 0,
             detail_split_percent: 50,
             dragging_split: false,
@@ -149,9 +151,11 @@ impl App {
 
         if self.filtered_indices.is_empty() {
             self.selected = 0;
+            self.list_offset = 0;
         } else if self.selected >= self.filtered_indices.len() {
             self.selected = self.filtered_indices.len() - 1;
         }
+        self.list_offset = self.list_offset.min(self.selected);
     }
 
     fn selected_item_index(&self) -> Option<usize> {
@@ -507,10 +511,11 @@ fn select_list_row_from_mouse(app: &mut App, row: u16) {
     }
 
     let offset = row - inner.y;
-    if usize::from(offset) >= app.filtered_indices.len() {
+    let selected = app.list_offset.saturating_add(usize::from(offset));
+    if selected >= app.filtered_indices.len() {
         return;
     }
-    app.selected = usize::from(offset);
+    app.selected = selected;
     app.detail_scroll = 0;
 }
 
@@ -586,9 +591,26 @@ fn render_main_panel(frame: &mut Frame, area: Rect, app: &mut App) {
     render_detail_and_preview(frame, main[1], app);
 }
 
-fn render_list_panel(frame: &mut Frame, area: Rect, app: &App) {
+fn render_list_panel(frame: &mut Frame, area: Rect, app: &mut App) {
     let total = app.filtered_indices.len();
     let current = if total == 0 { 0 } else { app.selected + 1 };
+    let inner = inner_rect(area);
+    let visible = usize::from(inner.height.max(1));
+
+    if total == 0 {
+        app.list_offset = 0;
+    } else {
+        if app.selected < app.list_offset {
+            app.list_offset = app.selected;
+        } else {
+            let end = app.list_offset.saturating_add(visible);
+            if app.selected >= end {
+                app.list_offset = app.selected.saturating_sub(visible.saturating_sub(1));
+            }
+        }
+        let max_offset = total.saturating_sub(visible);
+        app.list_offset = app.list_offset.min(max_offset);
+    }
 
     let items = app
         .filtered_indices
@@ -619,11 +641,12 @@ fn render_list_panel(frame: &mut Frame, area: Rect, app: &App) {
             .highlight_symbol("> ")
             .highlight_style(Style::default().add_modifier(Modifier::BOLD));
 
-    let mut state = ListState::default();
+    let mut state = ListState::default().with_offset(app.list_offset);
     if !app.filtered_indices.is_empty() {
         state.select(Some(app.selected));
     }
     frame.render_stateful_widget(list, area, &mut state);
+    app.list_offset = state.offset();
 }
 
 fn render_detail_and_preview(frame: &mut Frame, area: Rect, app: &mut App) {
