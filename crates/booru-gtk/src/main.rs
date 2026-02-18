@@ -14,8 +14,8 @@ use booru_core::{
 };
 use clap::Parser;
 use gtk::{
-    self, Align, Box as GtkBox, Button, FlowBox, Label, ListBox, Orientation, Picture,
-    ScrolledWindow, SearchEntry, SelectionMode,
+    self, Align, Box as GtkBox, Button, GridView, Label, ListBox, Orientation, Picture,
+    ScrolledWindow, SearchEntry, SelectionMode, SignalListItemFactory, SingleSelection,
 };
 
 #[derive(Parser, Debug)]
@@ -54,6 +54,13 @@ impl BrowserMode {
             _ => Self::List,
         }
     }
+}
+
+#[derive(Clone)]
+struct GridItemData {
+    title: String,
+    tooltip: String,
+    image_path: PathBuf,
 }
 
 struct AppState {
@@ -112,7 +119,8 @@ impl AppState {
 #[derive(Clone)]
 struct Ui {
     list: ListBox,
-    grid: FlowBox,
+    grid_store: gtk::gio::ListStore,
+    grid_selection: SingleSelection,
     browser_stack: ViewStack,
     picture: Picture,
     title: Label,
@@ -249,14 +257,81 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
     list_scroll.set_vexpand(true);
     list_scroll.add_css_class("navigation-sidebar");
 
-    let grid = FlowBox::new();
-    grid.set_selection_mode(SelectionMode::Single);
-    grid.set_activate_on_single_click(true);
-    grid.set_row_spacing(8);
-    grid.set_column_spacing(8);
-    grid.set_max_children_per_line(4);
-    grid.set_min_children_per_line(2);
-    grid.set_valign(Align::Start);
+    let grid_store = gtk::gio::ListStore::new::<gtk::glib::BoxedAnyObject>();
+    let grid_selection = SingleSelection::new(Some(grid_store.clone()));
+    grid_selection.set_autoselect(false);
+    grid_selection.set_can_unselect(true);
+
+    let grid_factory = SignalListItemFactory::new();
+    grid_factory.connect_setup(|_, list_item_obj| {
+        let Some(list_item) = list_item_obj.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+
+        let card = GtkBox::new(Orientation::Vertical, 6);
+        card.set_margin_start(6);
+        card.set_margin_end(6);
+        card.set_margin_top(6);
+        card.set_margin_bottom(6);
+
+        let thumb = Picture::new();
+        thumb.set_content_fit(gtk::ContentFit::Cover);
+        thumb.set_size_request(156, 156);
+        thumb.set_can_shrink(true);
+        thumb.set_halign(Align::Fill);
+
+        let caption = Label::new(None);
+        caption.set_wrap(false);
+        caption.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        caption.set_max_width_chars(20);
+        caption.set_xalign(0.0);
+        caption.add_css_class("caption");
+
+        card.append(&thumb);
+        card.append(&caption);
+        list_item.set_child(Some(&card));
+    });
+
+    grid_factory.connect_bind(|_, list_item_obj| {
+        let Some(list_item) = list_item_obj.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+
+        let Some(boxed_item) = list_item
+            .item()
+            .and_then(|obj| obj.downcast::<gtk::glib::BoxedAnyObject>().ok())
+        else {
+            return;
+        };
+
+        let data = boxed_item.borrow::<GridItemData>();
+        let Some((card, thumb, caption)) = grid_cell_widgets(list_item) else {
+            return;
+        };
+
+        thumb.set_filename(Some(&data.image_path));
+        caption.set_text(&data.title);
+        card.set_tooltip_text(Some(&data.tooltip));
+    });
+
+    grid_factory.connect_unbind(|_, list_item_obj| {
+        let Some(list_item) = list_item_obj.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+
+        let Some((card, thumb, caption)) = grid_cell_widgets(list_item) else {
+            return;
+        };
+
+        thumb.set_paintable(Option::<&gtk::gdk::Texture>::None);
+        caption.set_text("");
+        card.set_tooltip_text(None::<&str>);
+    });
+
+    let grid = GridView::new(Some(grid_selection.clone()), Some(grid_factory));
+    grid.set_single_click_activate(true);
+    grid.set_max_columns(4);
+    grid.set_min_columns(2);
     let grid_scroll = ScrolledWindow::new();
     grid_scroll.set_child(Some(&grid));
     grid_scroll.set_hexpand(true);
@@ -363,7 +438,8 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
 
     let ui = Ui {
         list,
-        grid,
+        grid_store,
+        grid_selection,
         browser_stack,
         picture,
         title,
@@ -481,14 +557,12 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
     {
         let state_handle = state.clone();
         let ui = ui.clone();
-        let grid_handle = ui.grid.clone();
-        grid_handle.connect_selected_children_changed(move |grid| {
-            let selected_pos = grid
-                .selected_children()
-                .into_iter()
-                .next()
-                .and_then(|child| usize::try_from(child.index()).ok());
-
+        let grid_selection = ui.grid_selection.clone();
+        grid_selection.connect_selected_notify(move |selection| {
+            let selected_pos = match selection.selected() {
+                gtk::INVALID_LIST_POSITION => None,
+                pos => usize::try_from(pos).ok(),
+            };
             {
                 let mut state = state_handle.borrow_mut();
                 state.selected_pos = selected_pos.filter(|pos| *pos < state.filtered_indices.len());
@@ -570,9 +644,7 @@ fn refresh_list(state: &Rc<RefCell<AppState>>, ui: &Ui) {
 }
 
 fn refresh_grid(state: &Rc<RefCell<AppState>>, ui: &Ui) {
-    while let Some(child) = ui.grid.first_child() {
-        ui.grid.remove(&child);
-    }
+    ui.grid_store.remove_all();
 
     let (items, selected_pos) = {
         let state = state.borrow();
@@ -581,53 +653,25 @@ fn refresh_grid(state: &Rc<RefCell<AppState>>, ui: &Ui) {
             .iter()
             .map(|item_idx| {
                 let item = &state.library.index.items[*item_idx];
-                (
-                    infer_thumbnail_title(item),
-                    item.image_path.clone(),
-                    item.merged_sensitive(),
-                )
+                let title = infer_thumbnail_title(item);
+                let tooltip = if item.merged_sensitive() {
+                    format!("[Sensitive] {}", item.image_path.display())
+                } else {
+                    item.image_path.display().to_string()
+                };
+                GridItemData {
+                    title,
+                    tooltip,
+                    image_path: item.image_path.clone(),
+                }
             })
-            .collect::<Vec<(String, PathBuf, bool)>>();
+            .collect::<Vec<GridItemData>>();
         (items, state.selected_pos)
     };
 
-    for (title, image_path, sensitive) in items {
-        let card = GtkBox::new(Orientation::Vertical, 6);
-        card.set_margin_start(6);
-        card.set_margin_end(6);
-        card.set_margin_top(6);
-        card.set_margin_bottom(6);
-
-        let thumb = Picture::new();
-        thumb.set_content_fit(gtk::ContentFit::Cover);
-        thumb.set_size_request(156, 156);
-        thumb.set_can_shrink(true);
-        thumb.set_halign(Align::Fill);
-        let load_path = image_path.clone();
-        thumb.connect_map(move |picture| {
-            picture.set_filename(Some(&load_path));
-        });
-        thumb.connect_unmap(move |picture| {
-            picture.set_paintable(Option::<&gtk::gdk::Texture>::None);
-        });
-
-        let caption = Label::new(Some(&title));
-        caption.set_wrap(false);
-        caption.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        caption.set_max_width_chars(20);
-        caption.set_xalign(0.0);
-        caption.add_css_class("caption");
-
-        card.append(&thumb);
-        card.append(&caption);
-
-        let tooltip = if sensitive {
-            format!("[Sensitive] {}", image_path.display())
-        } else {
-            image_path.display().to_string()
-        };
-        card.set_tooltip_text(Some(&tooltip));
-        ui.grid.append(&card);
+    for item in items {
+        let boxed = gtk::glib::BoxedAnyObject::new(item);
+        ui.grid_store.append(&boxed);
     }
 
     sync_browser_selection(ui, selected_pos);
@@ -796,17 +840,22 @@ fn infer_thumbnail_title(item: &booru_core::ImageItem) -> String {
     }
 }
 
+fn grid_cell_widgets(list_item: &gtk::ListItem) -> Option<(GtkBox, Picture, Label)> {
+    let card = list_item.child()?.downcast::<GtkBox>().ok()?;
+    let thumb = card.first_child()?.downcast::<Picture>().ok()?;
+    let caption = thumb.next_sibling()?.downcast::<Label>().ok()?;
+    Some((card, thumb, caption))
+}
+
 fn sync_browser_selection(ui: &Ui, selected_pos: Option<usize>) {
     let current_list_pos = ui
         .list
         .selected_row()
         .and_then(|row| usize::try_from(row.index()).ok());
-    let current_grid_pos = ui
-        .grid
-        .selected_children()
-        .into_iter()
-        .next()
-        .and_then(|child| usize::try_from(child.index()).ok());
+    let current_grid_pos = match ui.grid_selection.selected() {
+        gtk::INVALID_LIST_POSITION => None,
+        pos => usize::try_from(pos).ok(),
+    };
 
     match selected_pos {
         Some(pos) => {
@@ -819,11 +868,7 @@ fn sync_browser_selection(ui: &Ui, selected_pos: Option<usize>) {
             }
 
             if current_grid_pos != Some(pos) {
-                if let Some(child) = ui.grid.child_at_index(pos as i32) {
-                    ui.grid.select_child(&child);
-                } else {
-                    ui.grid.unselect_all();
-                }
+                ui.grid_selection.set_selected(pos as u32);
             }
         }
         None => {
@@ -831,7 +876,7 @@ fn sync_browser_selection(ui: &Ui, selected_pos: Option<usize>) {
                 ui.list.unselect_all();
             }
             if current_grid_pos.is_some() {
-                ui.grid.unselect_all();
+                ui.grid_selection.set_selected(gtk::INVALID_LIST_POSITION);
             }
         }
     }
