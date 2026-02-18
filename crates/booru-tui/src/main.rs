@@ -1,5 +1,6 @@
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -123,7 +124,7 @@ impl App {
             dragging_split: false,
             layout: LayoutInfo::default(),
             status: String::from(
-                "Tab switch focus, / search, j/k move or scroll, t add tags, s toggle sensitive, q quit",
+                "Enter open image, Tab switch focus, / search, j/k move or scroll, t add tags, s toggle sensitive, q quit",
             ),
             preview: None,
         };
@@ -235,6 +236,20 @@ impl App {
             if new_value { "ON" } else { "OFF" },
             image_path.display()
         );
+        Ok(())
+    }
+
+    fn open_selected_image(&mut self) -> Result<()> {
+        let Some(idx) = self.selected_item_index() else {
+            self.status = "No selected item.".to_string();
+            return Ok(());
+        };
+        let image_path = self.library.index.items[idx].image_path.clone();
+        Command::new("xdg-open")
+            .arg(&image_path)
+            .spawn()
+            .with_context(|| format!("failed to run xdg-open for {}", image_path.display()))?;
+        self.status = format!("Opened {}", image_path.display());
         Ok(())
     }
 
@@ -378,6 +393,11 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
 
     match key.code {
         KeyCode::Char('q') => return Ok(true),
+        KeyCode::Enter => {
+            if let Err(err) = app.open_selected_image() {
+                app.status = err.to_string();
+            }
+        }
         KeyCode::Tab => app.toggle_focus(),
         KeyCode::Char('h') | KeyCode::Left => app.set_focus(FocusPane::Images),
         KeyCode::Char('l') | KeyCode::Right => app.set_focus(FocusPane::Detail),
