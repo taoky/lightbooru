@@ -1,0 +1,587 @@
+use std::io;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use booru_core::{apply_update_to_image, BooruConfig, EditUpdate, ImageItem, Library};
+use clap::Parser;
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::execute;
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
+use image::DynamicImage;
+use ratatui::prelude::*;
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui_image::picker::Picker;
+use ratatui_image::protocol::StatefulProtocol;
+use ratatui_image::{Resize, StatefulImage};
+
+const TICK_RATE: Duration = Duration::from_millis(150);
+
+#[derive(Parser)]
+#[command(name = "booru-tui", version, about = "TUI browser for LightBooru")]
+struct Cli {
+    /// Base directory for gallery-dl downloads (can be repeated)
+    #[arg(long, short)]
+    base: Vec<PathBuf>,
+
+    /// Suppress scan warnings
+    #[arg(long)]
+    quiet: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InputMode {
+    Normal,
+    Search,
+    Tag,
+}
+
+struct Preview {
+    picker: Picker,
+    current_path: Option<PathBuf>,
+    protocol: Option<StatefulProtocol>,
+    last_error: Option<String>,
+}
+
+impl Preview {
+    fn new(picker: Picker) -> Self {
+        Self {
+            picker,
+            current_path: None,
+            protocol: None,
+            last_error: None,
+        }
+    }
+
+    fn protocol_label(&self) -> String {
+        format!("{:?}", self.picker.protocol_type())
+    }
+
+    fn load_for_path(&mut self, path: &Path) {
+        if self.current_path.as_deref() == Some(path) {
+            return;
+        }
+        self.current_path = Some(path.to_path_buf());
+
+        match load_image(path) {
+            Ok(image) => {
+                self.protocol = Some(self.picker.new_resize_protocol(image));
+                self.last_error = None;
+            }
+            Err(err) => {
+                self.protocol = None;
+                self.last_error = Some(format!("failed to load image: {err}"));
+            }
+        }
+    }
+}
+
+struct App {
+    library: Library,
+    filtered_indices: Vec<usize>,
+    selected: usize,
+    mode: InputMode,
+    search_input: String,
+    input_buffer: String,
+    status: String,
+    preview: Option<Preview>,
+}
+
+impl App {
+    fn new(library: Library) -> Self {
+        let mut app = Self {
+            library,
+            filtered_indices: Vec::new(),
+            selected: 0,
+            mode: InputMode::Normal,
+            search_input: String::new(),
+            input_buffer: String::new(),
+            status: String::from("/ search, j/k move, t add tags, s toggle sensitive, q quit"),
+            preview: None,
+        };
+        app.rebuild_filter();
+        app
+    }
+
+    fn set_preview_picker(&mut self, picker: Picker) {
+        let mut preview = Preview::new(picker);
+        if let Some(idx) = self.selected_item_index() {
+            let path = self.library.index.items[idx].image_path.clone();
+            preview.load_for_path(&path);
+        }
+        self.status = format!(
+            "{} | preview protocol {}",
+            self.status,
+            preview.protocol_label()
+        );
+        self.preview = Some(preview);
+    }
+
+    fn rebuild_filter(&mut self) {
+        let terms = split_terms(&self.search_input);
+        self.filtered_indices = self
+            .library
+            .index
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, item)| item_matches_terms(item, &terms).then_some(idx))
+            .collect();
+
+        if self.filtered_indices.is_empty() {
+            self.selected = 0;
+        } else if self.selected >= self.filtered_indices.len() {
+            self.selected = self.filtered_indices.len() - 1;
+        }
+    }
+
+    fn selected_item_index(&self) -> Option<usize> {
+        self.filtered_indices.get(self.selected).copied()
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        if self.filtered_indices.is_empty() {
+            self.selected = 0;
+            return;
+        }
+
+        let len = self.filtered_indices.len() as isize;
+        let mut next = self.selected as isize + delta;
+        if next < 0 {
+            next = 0;
+        }
+        if next >= len {
+            next = len - 1;
+        }
+        self.selected = next as usize;
+    }
+
+    fn toggle_sensitive(&mut self) -> Result<()> {
+        let Some(idx) = self.selected_item_index() else {
+            self.status = "No selected item.".to_string();
+            return Ok(());
+        };
+        let item = &self.library.index.items[idx];
+        let new_value = !item.merged_sensitive();
+        let image_path = item.image_path.clone();
+
+        let edits = apply_update_to_image(
+            &image_path,
+            EditUpdate {
+                set_tags: None,
+                add_tags: Vec::new(),
+                remove_tags: Vec::new(),
+                clear_tags: false,
+                notes: None,
+                sensitive: Some(new_value),
+            },
+        )
+        .with_context(|| format!("failed to update {}", image_path.display()))?;
+
+        self.library.index.items[idx].edits = edits;
+        self.status = format!(
+            "Sensitive set to {} for {}",
+            if new_value { "ON" } else { "OFF" },
+            image_path.display()
+        );
+        Ok(())
+    }
+
+    fn add_tags_from_input(&mut self) -> Result<()> {
+        let tags = parse_tags(&self.input_buffer);
+        if tags.is_empty() {
+            self.status = "No tags entered.".to_string();
+            return Ok(());
+        }
+
+        let Some(idx) = self.selected_item_index() else {
+            self.status = "No selected item.".to_string();
+            return Ok(());
+        };
+        let image_path = self.library.index.items[idx].image_path.clone();
+
+        let edits = apply_update_to_image(
+            &image_path,
+            EditUpdate {
+                set_tags: None,
+                add_tags: tags.clone(),
+                remove_tags: Vec::new(),
+                clear_tags: false,
+                notes: None,
+                sensitive: None,
+            },
+        )
+        .with_context(|| format!("failed to update {}", image_path.display()))?;
+
+        self.library.index.items[idx].edits = edits;
+        self.rebuild_filter();
+        self.status = format!("Added tags [{}]", tags.join(", "));
+        Ok(())
+    }
+}
+
+fn split_terms(input: &str) -> Vec<String> {
+    input
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .map(|term| term.to_lowercase())
+        .collect()
+}
+
+fn parse_tags(input: &str) -> Vec<String> {
+    let normalized = input.replace(',', " ");
+    normalized
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn load_image(path: &Path) -> Result<DynamicImage> {
+    image::open(path).with_context(|| format!("unable to decode {}", path.display()))
+}
+
+fn item_matches_terms(item: &ImageItem, terms: &[String]) -> bool {
+    if terms.is_empty() {
+        return true;
+    }
+
+    let tags = item
+        .merged_tags()
+        .into_iter()
+        .map(|tag| tag.to_lowercase())
+        .collect::<Vec<_>>();
+    let author = item.merged_author().unwrap_or_default().to_lowercase();
+    let detail = item.merged_detail().unwrap_or_default().to_lowercase();
+    let path = item.image_path.to_string_lossy().to_lowercase();
+
+    terms.iter().all(|needle| {
+        tags.iter().any(|tag| tag.contains(needle))
+            || author.contains(needle)
+            || detail.contains(needle)
+            || path.contains(needle)
+    })
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let config = if cli.base.is_empty() {
+        BooruConfig::default()
+    } else {
+        BooruConfig::with_roots(cli.base)
+    };
+
+    let library = Library::scan(config)?;
+    if !cli.quiet {
+        for warning in &library.warnings {
+            eprintln!("warning: {}: {}", warning.path.display(), warning.message);
+        }
+    }
+
+    run_tui(App::new(library))
+}
+
+fn run_tui(mut app: App) -> Result<()> {
+    enable_raw_mode().context("failed to enable raw mode")?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen).context("failed to enter alt screen")?;
+    let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+    app.set_preview_picker(picker);
+
+    let backend = ratatui::backend::CrosstermBackend::new(stdout);
+    let mut terminal = ratatui::Terminal::new(backend).context("failed to init terminal")?;
+
+    let result = run_event_loop(&mut terminal, &mut app);
+
+    disable_raw_mode().ok();
+    execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
+    terminal.show_cursor().ok();
+
+    result
+}
+
+fn run_event_loop(
+    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+) -> Result<()> {
+    loop {
+        terminal.draw(|frame| render_ui(frame, app))?;
+
+        if !event::poll(TICK_RATE)? {
+            continue;
+        }
+
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+
+        if handle_key_event(app, key)? {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<bool> {
+    match app.mode {
+        InputMode::Normal => handle_normal_mode(app, key),
+        InputMode::Search => Ok(handle_text_mode(app, key, InputMode::Search)?),
+        InputMode::Tag => Ok(handle_text_mode(app, key, InputMode::Tag)?),
+    }
+}
+
+fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        return Ok(true);
+    }
+
+    match key.code {
+        KeyCode::Char('q') => return Ok(true),
+        KeyCode::Char('j') | KeyCode::Down => app.move_selection(1),
+        KeyCode::Char('k') | KeyCode::Up => app.move_selection(-1),
+        KeyCode::PageDown => app.move_selection(10),
+        KeyCode::PageUp => app.move_selection(-10),
+        KeyCode::Char('/') => {
+            app.mode = InputMode::Search;
+            app.input_buffer = app.search_input.clone();
+            app.status = "Search mode: type query and press Enter".to_string();
+        }
+        KeyCode::Char('t') => {
+            app.mode = InputMode::Tag;
+            app.input_buffer.clear();
+            app.status = "Tag mode: input tags (space/comma separated) and press Enter".to_string();
+        }
+        KeyCode::Char('s') => {
+            if let Err(err) = app.toggle_sensitive() {
+                app.status = err.to_string();
+            }
+        }
+        _ => {}
+    }
+
+    Ok(false)
+}
+
+fn handle_text_mode(app: &mut App, key: KeyEvent, mode: InputMode) -> Result<bool> {
+    match key.code {
+        KeyCode::Esc => {
+            app.mode = InputMode::Normal;
+            app.input_buffer.clear();
+            app.status = "Canceled.".to_string();
+        }
+        KeyCode::Enter => {
+            if mode == InputMode::Search {
+                app.search_input = app.input_buffer.trim().to_string();
+                app.rebuild_filter();
+                app.status = format!("Filter updated: {} result(s)", app.filtered_indices.len());
+            } else {
+                if let Err(err) = app.add_tags_from_input() {
+                    app.status = err.to_string();
+                }
+            }
+            app.mode = InputMode::Normal;
+            app.input_buffer.clear();
+        }
+        KeyCode::Backspace => {
+            app.input_buffer.pop();
+        }
+        KeyCode::Char(ch) => {
+            if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                app.input_buffer.push(ch);
+            }
+        }
+        _ => {}
+    }
+
+    Ok(false)
+}
+
+fn render_ui(frame: &mut Frame, app: &mut App) {
+    let areas = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(8),
+            Constraint::Length(2),
+        ])
+        .split(frame.area());
+
+    render_search_panel(frame, areas[0], app);
+    render_main_panel(frame, areas[1], app);
+    render_status(frame, areas[2], app);
+}
+
+fn render_search_panel(frame: &mut Frame, area: Rect, app: &App) {
+    let label = match app.mode {
+        InputMode::Search => format!("Search: {}_", app.input_buffer),
+        _ => format!("Search: {}", app.search_input),
+    };
+    let paragraph =
+        Paragraph::new(label).block(Block::default().borders(Borders::ALL).title("Filter"));
+    frame.render_widget(paragraph, area);
+}
+
+fn render_main_panel(frame: &mut Frame, area: Rect, app: &mut App) {
+    let main = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+        .split(area);
+
+    render_list_panel(frame, main[0], app);
+    render_detail_and_preview(frame, main[1], app);
+}
+
+fn render_list_panel(frame: &mut Frame, area: Rect, app: &App) {
+    let items = app
+        .filtered_indices
+        .iter()
+        .map(|idx| {
+            let item = &app.library.index.items[*idx];
+            let file_name = item
+                .image_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("(unknown)");
+            let author = item
+                .merged_author()
+                .unwrap_or_else(|| "(unknown)".to_string());
+            ListItem::new(format!("{file_name} | {author}"))
+        })
+        .collect::<Vec<_>>();
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("Images ({})", app.filtered_indices.len())),
+        )
+        .highlight_symbol("> ")
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+
+    let mut state = ListState::default();
+    if !app.filtered_indices.is_empty() {
+        state.select(Some(app.selected));
+    }
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn render_detail_and_preview(frame: &mut Frame, area: Rect, app: &mut App) {
+    let columns = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
+        .split(area);
+
+    let Some(item_idx) = app.selected_item_index() else {
+        let empty = Paragraph::new("No items.")
+            .block(Block::default().borders(Borders::ALL).title("Detail"));
+        frame.render_widget(empty, columns[0]);
+        render_preview_panel(
+            frame,
+            columns[1],
+            app,
+            None,
+            "Preview not available.".to_string(),
+        );
+        return;
+    };
+
+    let (detail_text, image_path, preview_fallback) = {
+        let item = &app.library.index.items[item_idx];
+        let detail_text = format!(
+            "Path: {}\nAuthor: {}\nDate: {}\nSensitive: {}\nTags: {}\nNotes: {}\nURL: {}\n\nDetail:\n{}",
+            item.image_path.display(),
+            item.merged_author().unwrap_or_else(|| "(none)".to_string()),
+            item.merged_date().unwrap_or_else(|| "(none)".to_string()),
+            if item.merged_sensitive() { "yes" } else { "no" },
+            {
+                let tags = item.merged_tags();
+                if tags.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    tags.join(" ")
+                }
+            },
+            item.edits.notes.as_deref().unwrap_or("(none)"),
+            item.platform_url().unwrap_or_else(|| "(none)".to_string()),
+            item.merged_detail().unwrap_or_else(|| "(none)".to_string())
+        );
+        let preview_fallback = format!(
+            "Image: {}\nMetadata: {}\nBooru edits: {}",
+            item.image_path.display(),
+            item.meta_path.display(),
+            item.booru_path.display()
+        );
+        (detail_text, item.image_path.clone(), preview_fallback)
+    };
+
+    let detail = Paragraph::new(detail_text)
+        .block(Block::default().borders(Borders::ALL).title("Detail"))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(detail, columns[0]);
+
+    render_preview_panel(frame, columns[1], app, Some(image_path), preview_fallback);
+}
+
+fn render_preview_panel(
+    frame: &mut Frame,
+    area: Rect,
+    app: &mut App,
+    image_path: Option<PathBuf>,
+    fallback: String,
+) {
+    let title = app
+        .preview
+        .as_ref()
+        .map(|preview| format!("Preview ({})", preview.protocol_label()))
+        .unwrap_or_else(|| "Preview".to_string());
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let Some(path) = image_path else {
+        let text = Paragraph::new(fallback).wrap(Wrap { trim: false });
+        frame.render_widget(text, inner);
+        return;
+    };
+
+    let Some(preview) = app.preview.as_mut() else {
+        let text = Paragraph::new(format!("{fallback}\n\nPreview backend is not initialized."))
+            .wrap(Wrap { trim: false });
+        frame.render_widget(text, inner);
+        return;
+    };
+
+    preview.load_for_path(&path);
+    if let Some(protocol) = preview.protocol.as_mut() {
+        frame.render_stateful_widget(
+            StatefulImage::default().resize(Resize::Fit(None)),
+            inner,
+            protocol,
+        );
+        return;
+    }
+
+    let error = preview
+        .last_error
+        .as_deref()
+        .unwrap_or("unknown image decode error");
+    let text = Paragraph::new(format!("{fallback}\n\nPreview unavailable: {error}"))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(text, inner);
+}
+
+fn render_status(frame: &mut Frame, area: Rect, app: &App) {
+    let prefix = match app.mode {
+        InputMode::Normal => "NORMAL",
+        InputMode::Search => "SEARCH",
+        InputMode::Tag => "TAG",
+    };
+    let status = Paragraph::new(format!("[{prefix}] {}", app.status))
+        .block(Block::default().borders(Borders::ALL).title("Status"));
+    frame.render_widget(status, area);
+}

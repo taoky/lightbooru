@@ -20,6 +20,7 @@ pub struct TagEdits {
 pub struct BooruEdits {
     pub tags: TagEdits,
     pub notes: Option<String>,
+    pub sensitive: Option<bool>,
     #[serde(flatten)]
     pub extra: HashMap<String, Value>,
 }
@@ -31,6 +32,7 @@ pub struct EditUpdate {
     pub remove_tags: Vec<String>,
     pub clear_tags: bool,
     pub notes: Option<String>,
+    pub sensitive: Option<bool>,
 }
 
 impl BooruEdits {
@@ -109,6 +111,10 @@ impl BooruEdits {
 
         if let Some(notes) = update.notes {
             self.notes = Some(notes);
+        }
+
+        if let Some(sensitive) = update.sensitive {
+            self.sensitive = Some(sensitive);
         }
     }
 

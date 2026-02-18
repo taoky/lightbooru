@@ -461,6 +461,7 @@ fn edit_command(
         remove_tags: flatten_tag_args(remove_tags),
         clear_tags,
         notes,
+        sensitive: None,
     };
 
     let edits =

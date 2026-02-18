@@ -129,6 +129,10 @@ impl ImageItem {
     }
 
     pub fn merged_sensitive(&self) -> bool {
+        if let Some(sensitive) = self.edits.sensitive {
+            return sensitive;
+        }
+
         if let Some(flag) = extract_bool_field(
             &self.original,
             &["sensitive", "nsfw", "is_sensitive", "is_nsfw"],
