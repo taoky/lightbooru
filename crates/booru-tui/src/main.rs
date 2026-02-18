@@ -45,6 +45,7 @@ enum InputMode {
     Normal,
     Search,
     Tag,
+    ConfirmSensitive,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -116,6 +117,7 @@ struct App {
     layout: LayoutInfo,
     status: String,
     preview: Option<Preview>,
+    pending_sensitive_index: Option<usize>,
 }
 
 impl App {
@@ -138,6 +140,7 @@ impl App {
             layout: LayoutInfo::default(),
             status: String::from("Press ? for help. / search, t edit tags, q quit."),
             preview: None,
+            pending_sensitive_index: None,
         };
         app.rebuild_filter();
         app
@@ -241,15 +244,8 @@ impl App {
         self.detail_split_percent = pct as u16;
     }
 
-    fn toggle_sensitive(&mut self) -> Result<()> {
-        let Some(idx) = self.selected_item_index() else {
-            self.status = "No selected item.".to_string();
-            return Ok(());
-        };
-        let item = &self.library.index.items[idx];
-        let new_value = !item.merged_sensitive();
-        let image_path = item.image_path.clone();
-
+    fn set_sensitive(&mut self, idx: usize, new_value: bool) -> Result<()> {
+        let image_path = self.library.index.items[idx].image_path.clone();
         let edits = apply_update_to_image(
             &image_path,
             EditUpdate {
@@ -271,6 +267,50 @@ impl App {
             image_path.display()
         );
         Ok(())
+    }
+
+    fn toggle_sensitive(&mut self) -> Result<()> {
+        let Some(idx) = self.selected_item_index() else {
+            self.status = "No selected item.".to_string();
+            return Ok(());
+        };
+
+        if self.library.index.items[idx].merged_sensitive() {
+            return self.set_sensitive(idx, false);
+        }
+
+        self.mode = InputMode::ConfirmSensitive;
+        self.pending_sensitive_index = Some(idx);
+        let image_path = self.library.index.items[idx].image_path.clone();
+        self.status = format!(
+            "Confirm mark as sensitive for {} (Enter/y confirm, Esc/n cancel)",
+            image_path.display()
+        );
+        Ok(())
+    }
+
+    fn confirm_mark_sensitive(&mut self) -> Result<()> {
+        let Some(idx) = self.pending_sensitive_index.take() else {
+            self.mode = InputMode::Normal;
+            self.status = "No pending sensitive action.".to_string();
+            return Ok(());
+        };
+        self.mode = InputMode::Normal;
+        if idx >= self.library.index.items.len() {
+            self.status = "Selected item no longer exists.".to_string();
+            return Ok(());
+        }
+        if self.library.index.items[idx].merged_sensitive() {
+            self.status = "Selected item is already marked sensitive.".to_string();
+            return Ok(());
+        }
+        self.set_sensitive(idx, true)
+    }
+
+    fn cancel_mark_sensitive(&mut self) {
+        self.pending_sensitive_index = None;
+        self.mode = InputMode::Normal;
+        self.status = "Mark sensitive canceled.".to_string();
     }
 
     fn open_selected_image(&mut self) -> Result<()> {
@@ -566,6 +606,7 @@ fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<bool> {
         InputMode::Normal => handle_normal_mode(app, key),
         InputMode::Search => Ok(handle_text_mode(app, key, InputMode::Search)?),
         InputMode::Tag => Ok(handle_text_mode(app, key, InputMode::Tag)?),
+        InputMode::ConfirmSensitive => handle_confirm_sensitive_mode(app, key),
     }
 }
 
@@ -611,7 +652,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
             app.status =
                 "Tag mode: +tag add, -tag remove (space/comma separated), Enter apply".to_string();
         }
-        KeyCode::Char('s') => {
+        KeyCode::Char('s') | KeyCode::Char('S') => {
             if let Err(err) = app.toggle_sensitive() {
                 app.status = err.to_string();
             }
@@ -622,8 +663,27 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
     Ok(false)
 }
 
+fn handle_confirm_sensitive_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
+    match key.code {
+        KeyCode::Enter
+        | KeyCode::Char('y')
+        | KeyCode::Char('Y')
+        | KeyCode::Char('s')
+        | KeyCode::Char('S') => {
+            if let Err(err) = app.confirm_mark_sensitive() {
+                app.status = err.to_string();
+            }
+        }
+        KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('q') => {
+            app.cancel_mark_sensitive();
+        }
+        _ => {}
+    }
+    Ok(false)
+}
+
 fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
-    if app.show_help {
+    if app.show_help || app.mode == InputMode::ConfirmSensitive {
         return;
     }
 
@@ -752,6 +812,8 @@ fn render_ui(frame: &mut Frame, app: &mut App) {
     render_status(frame, areas[2], app);
     if app.show_help {
         render_help_dialog(frame);
+    } else if app.mode == InputMode::ConfirmSensitive {
+        render_sensitive_confirm_dialog(frame, app);
     }
 }
 
@@ -759,7 +821,7 @@ fn render_search_panel(frame: &mut Frame, area: Rect, app: &App) {
     let label = match app.mode {
         InputMode::Search => format!("Search: {}_", app.input_buffer),
         InputMode::Tag => format!("Tag edit (+tag/-tag): {}_", app.input_buffer),
-        InputMode::Normal => format!("Search: {}", app.search_input),
+        InputMode::Normal | InputMode::ConfirmSensitive => format!("Search: {}", app.search_input),
     };
     let paragraph =
         Paragraph::new(label).block(Block::default().borders(Borders::ALL).title("Filter"));
@@ -1050,10 +1112,11 @@ fn render_help_dialog(frame: &mut Frame) {
         "  b                     Jump back from random history",
         "  /                     Search",
         "  t                     Edit tags (+tag / -tag)",
-        "  s                     Toggle sensitive for selected image",
+        "  s / S                 Toggle sensitive (mark-as-sensitive asks confirm)",
         "",
         "Sensitive filter:",
         "  Hidden by default, use --sensitive to include.",
+        "  Confirm uses Enter/y, cancel with Esc/n.",
         "",
         "General:",
         "  ? or Esc              Close this help",
@@ -1066,11 +1129,32 @@ fn render_help_dialog(frame: &mut Frame) {
     frame.render_widget(dialog, area);
 }
 
+fn render_sensitive_confirm_dialog(frame: &mut Frame, app: &App) {
+    let area = centered_rect(70, 26, frame.area());
+    frame.render_widget(Clear, area);
+    let target = app
+        .pending_sensitive_index
+        .and_then(|idx| app.library.index.items.get(idx))
+        .map(|item| item.image_path.display().to_string())
+        .unwrap_or_else(|| "(missing item)".to_string());
+    let text =
+        format!("Mark selected item as sensitive?\n\n{target}\n\nEnter/y: confirm\nEsc/n: cancel");
+    let dialog = Paragraph::new(text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Confirm Sensitive"),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(dialog, area);
+}
+
 fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     let prefix = match app.mode {
         InputMode::Normal => "NORMAL",
         InputMode::Search => "SEARCH",
         InputMode::Tag => "TAG",
+        InputMode::ConfirmSensitive => "CONFIRM",
     };
     let focus = match app.focus {
         FocusPane::Images => "Images",
