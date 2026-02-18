@@ -5,7 +5,10 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use booru_core::{apply_update_to_image, BooruConfig, EditUpdate, Library, SearchQuery};
 use clap::Parser;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
+    MouseButton, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -36,6 +39,21 @@ enum InputMode {
     Normal,
     Search,
     Tag,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FocusPane {
+    Images,
+    Detail,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct LayoutInfo {
+    list_area: Rect,
+    right_area: Rect,
+    detail_area: Rect,
+    preview_area: Rect,
+    detail_preview_divider_y: Option<u16>,
 }
 
 struct Preview {
@@ -79,8 +97,13 @@ struct App {
     filtered_indices: Vec<usize>,
     selected: usize,
     mode: InputMode,
+    focus: FocusPane,
     search_input: String,
     input_buffer: String,
+    detail_scroll: u16,
+    detail_split_percent: u16,
+    dragging_split: bool,
+    layout: LayoutInfo,
     status: String,
     preview: Option<Preview>,
 }
@@ -92,9 +115,16 @@ impl App {
             filtered_indices: Vec::new(),
             selected: 0,
             mode: InputMode::Normal,
+            focus: FocusPane::Images,
             search_input: String::new(),
             input_buffer: String::new(),
-            status: String::from("/ search, j/k move, t add tags, s toggle sensitive, q quit"),
+            detail_scroll: 0,
+            detail_split_percent: 50,
+            dragging_split: false,
+            layout: LayoutInfo::default(),
+            status: String::from(
+                "Tab switch focus, / search, j/k move or scroll, t add tags, s toggle sensitive, q quit",
+            ),
             preview: None,
         };
         app.rebuild_filter();
@@ -134,6 +164,7 @@ impl App {
         }
 
         let len = self.filtered_indices.len() as isize;
+        let old = self.selected;
         let mut next = self.selected as isize + delta;
         if next < 0 {
             next = 0;
@@ -142,6 +173,38 @@ impl App {
             next = len - 1;
         }
         self.selected = next as usize;
+        if self.selected != old {
+            self.detail_scroll = 0;
+        }
+    }
+
+    fn toggle_focus(&mut self) {
+        self.focus = match self.focus {
+            FocusPane::Images => FocusPane::Detail,
+            FocusPane::Detail => FocusPane::Images,
+        };
+    }
+
+    fn set_focus(&mut self, focus: FocusPane) {
+        self.focus = focus;
+    }
+
+    fn scroll_detail(&mut self, delta: isize) {
+        if delta >= 0 {
+            self.detail_scroll = self.detail_scroll.saturating_add(delta as u16);
+        } else {
+            self.detail_scroll = self.detail_scroll.saturating_sub((-delta) as u16);
+        }
+    }
+
+    fn update_detail_split_from_mouse(&mut self, y: u16) {
+        if self.layout.right_area.height < 4 {
+            return;
+        }
+        let rel = y.saturating_sub(self.layout.right_area.y);
+        let mut pct = (u32::from(rel) * 100 / u32::from(self.layout.right_area.height)) as i32;
+        pct = pct.clamp(25, 75);
+        self.detail_split_percent = pct as u16;
     }
 
     fn toggle_sensitive(&mut self) -> Result<()> {
@@ -252,7 +315,8 @@ fn main() -> Result<()> {
 fn run_tui(mut app: App) -> Result<()> {
     enable_raw_mode().context("failed to enable raw mode")?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen).context("failed to enter alt screen")?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+        .context("failed to enter alt screen")?;
     let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
     app.set_preview_picker(picker);
 
@@ -262,7 +326,12 @@ fn run_tui(mut app: App) -> Result<()> {
     let result = run_event_loop(&mut terminal, &mut app);
 
     disable_raw_mode().ok();
-    execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )
+    .ok();
     terminal.show_cursor().ok();
 
     result
@@ -279,12 +348,15 @@ fn run_event_loop(
             continue;
         }
 
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-
-        if handle_key_event(app, key)? {
-            break;
+        match event::read()? {
+            Event::Key(key) => {
+                if handle_key_event(app, key)? {
+                    break;
+                }
+            }
+            Event::Mouse(mouse) => handle_mouse_event(app, mouse),
+            Event::Resize(_, _) => {}
+            _ => {}
         }
     }
 
@@ -306,10 +378,25 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
 
     match key.code {
         KeyCode::Char('q') => return Ok(true),
-        KeyCode::Char('j') | KeyCode::Down => app.move_selection(1),
-        KeyCode::Char('k') | KeyCode::Up => app.move_selection(-1),
-        KeyCode::PageDown => app.move_selection(10),
-        KeyCode::PageUp => app.move_selection(-10),
+        KeyCode::Tab => app.toggle_focus(),
+        KeyCode::Char('h') | KeyCode::Left => app.set_focus(FocusPane::Images),
+        KeyCode::Char('l') | KeyCode::Right => app.set_focus(FocusPane::Detail),
+        KeyCode::Char('j') | KeyCode::Down => match app.focus {
+            FocusPane::Images => app.move_selection(1),
+            FocusPane::Detail => app.scroll_detail(1),
+        },
+        KeyCode::Char('k') | KeyCode::Up => match app.focus {
+            FocusPane::Images => app.move_selection(-1),
+            FocusPane::Detail => app.scroll_detail(-1),
+        },
+        KeyCode::PageDown => match app.focus {
+            FocusPane::Images => app.move_selection(10),
+            FocusPane::Detail => app.scroll_detail(10),
+        },
+        KeyCode::PageUp => match app.focus {
+            FocusPane::Images => app.move_selection(-10),
+            FocusPane::Detail => app.scroll_detail(-10),
+        },
         KeyCode::Char('/') => {
             app.mode = InputMode::Search;
             app.input_buffer = app.search_input.clone();
@@ -329,6 +416,82 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
     }
 
     Ok(false)
+}
+
+fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
+    let (x, y) = (mouse.column, mouse.row);
+    let on_divider = app
+        .layout
+        .detail_preview_divider_y
+        .map(|divider_y| {
+            point_in_rect(x, y, app.layout.right_area)
+                && (y == divider_y || y == divider_y.saturating_sub(1))
+        })
+        .unwrap_or(false);
+
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            if on_divider {
+                app.dragging_split = true;
+                app.status = "Resizing detail/preview split".to_string();
+                return;
+            }
+
+            if point_in_rect(x, y, app.layout.list_area) {
+                app.set_focus(FocusPane::Images);
+                select_list_row_from_mouse(app, y);
+                return;
+            }
+
+            if point_in_rect(x, y, app.layout.detail_area) {
+                app.set_focus(FocusPane::Detail);
+            }
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            if app.dragging_split {
+                app.update_detail_split_from_mouse(y);
+            }
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            app.dragging_split = false;
+        }
+        MouseEventKind::ScrollUp => {
+            if point_in_rect(x, y, app.layout.detail_area) {
+                app.set_focus(FocusPane::Detail);
+                app.scroll_detail(-3);
+            } else if point_in_rect(x, y, app.layout.list_area) {
+                app.set_focus(FocusPane::Images);
+                app.move_selection(-3);
+            }
+        }
+        MouseEventKind::ScrollDown => {
+            if point_in_rect(x, y, app.layout.detail_area) {
+                app.set_focus(FocusPane::Detail);
+                app.scroll_detail(3);
+            } else if point_in_rect(x, y, app.layout.list_area) {
+                app.set_focus(FocusPane::Images);
+                app.move_selection(3);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn select_list_row_from_mouse(app: &mut App, row: u16) {
+    if app.filtered_indices.is_empty() {
+        return;
+    }
+    let inner = inner_rect(app.layout.list_area);
+    if inner.height == 0 || row < inner.y {
+        return;
+    }
+
+    let offset = row - inner.y;
+    if usize::from(offset) >= app.filtered_indices.len() {
+        return;
+    }
+    app.selected = usize::from(offset);
+    app.detail_scroll = 0;
 }
 
 fn handle_text_mode(app: &mut App, key: KeyEvent, mode: InputMode) -> Result<bool> {
@@ -396,6 +559,9 @@ fn render_main_panel(frame: &mut Frame, area: Rect, app: &mut App) {
         .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
         .split(area);
 
+    app.layout.list_area = main[0];
+    app.layout.right_area = main[1];
+
     render_list_panel(frame, main[0], app);
     render_detail_and_preview(frame, main[1], app);
 }
@@ -421,14 +587,17 @@ fn render_list_panel(frame: &mut Frame, area: Rect, app: &App) {
         })
         .collect::<Vec<_>>();
 
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!("Images ({current}/{total})")),
-        )
-        .highlight_symbol("> ")
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+    let list =
+        List::new(items)
+            .block(Block::default().borders(Borders::ALL).title(
+                if app.focus == FocusPane::Images {
+                    format!("Images ({current}/{total}) [Focus]")
+                } else {
+                    format!("Images ({current}/{total})")
+                },
+            ))
+            .highlight_symbol("> ")
+            .highlight_style(Style::default().add_modifier(Modifier::BOLD));
 
     let mut state = ListState::default();
     if !app.filtered_indices.is_empty() {
@@ -438,14 +607,27 @@ fn render_list_panel(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_detail_and_preview(frame: &mut Frame, area: Rect, app: &mut App) {
+    let detail_pct = app.detail_split_percent.clamp(25, 75);
     let columns = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
+        .constraints([
+            Constraint::Percentage(detail_pct),
+            Constraint::Percentage(100 - detail_pct),
+        ])
         .split(area);
+    app.layout.detail_area = columns[0];
+    app.layout.preview_area = columns[1];
+    app.layout.detail_preview_divider_y = Some(columns[1].y);
 
     let Some(item_idx) = app.selected_item_index() else {
-        let empty = Paragraph::new("No items.")
-            .block(Block::default().borders(Borders::ALL).title("Detail"));
+        let empty =
+            Paragraph::new("No items.").block(Block::default().borders(Borders::ALL).title(
+                if app.focus == FocusPane::Detail {
+                    "Detail [Focus]"
+                } else {
+                    "Detail"
+                },
+            ));
         frame.render_widget(empty, columns[0]);
         render_preview_panel(
             frame,
@@ -486,8 +668,23 @@ fn render_detail_and_preview(frame: &mut Frame, area: Rect, app: &mut App) {
         (detail_text, item.image_path.clone(), preview_fallback)
     };
 
+    let detail_block =
+        Block::default()
+            .borders(Borders::ALL)
+            .title(if app.focus == FocusPane::Detail {
+                "Detail [Focus]"
+            } else {
+                "Detail"
+            });
+    let detail_inner = detail_block.inner(columns[0]);
+    let detail_visible_lines = detail_inner.height;
+    let detail_total_lines = estimate_wrapped_lines(&detail_text, detail_inner.width);
+    let max_scroll = detail_total_lines.saturating_sub(detail_visible_lines);
+    app.detail_scroll = app.detail_scroll.min(max_scroll);
+
     let detail = Paragraph::new(detail_text)
-        .block(Block::default().borders(Borders::ALL).title("Detail"))
+        .block(detail_block)
+        .scroll((app.detail_scroll, 0))
         .wrap(Wrap { trim: false });
     frame.render_widget(detail, columns[0]);
 
@@ -538,13 +735,50 @@ fn render_preview_panel(
     frame.render_widget(text, inner);
 }
 
+fn estimate_wrapped_lines(text: &str, width: u16) -> u16 {
+    if width == 0 {
+        return 0;
+    }
+
+    let mut total: u32 = 0;
+    let width_u32 = u32::from(width);
+    for line in text.split('\n') {
+        let line_width = line.chars().count() as u32;
+        let wrapped = if line_width == 0 {
+            1
+        } else {
+            line_width.div_ceil(width_u32)
+        };
+        total = total.saturating_add(wrapped);
+    }
+    total.min(u32::from(u16::MAX)) as u16
+}
+
+fn point_in_rect(x: u16, y: u16, rect: Rect) -> bool {
+    if rect.width == 0 || rect.height == 0 {
+        return false;
+    }
+    x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
+}
+
+fn inner_rect(rect: Rect) -> Rect {
+    if rect.width <= 2 || rect.height <= 2 {
+        return Rect::new(rect.x, rect.y, 0, 0);
+    }
+    Rect::new(rect.x + 1, rect.y + 1, rect.width - 2, rect.height - 2)
+}
+
 fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     let prefix = match app.mode {
         InputMode::Normal => "NORMAL",
         InputMode::Search => "SEARCH",
         InputMode::Tag => "TAG",
     };
-    let status = Paragraph::new(format!("[{prefix}] {}", app.status))
+    let focus = match app.focus {
+        FocusPane::Images => "Images",
+        FocusPane::Detail => "Detail",
+    };
+    let status = Paragraph::new(format!("[{prefix} | Focus:{focus}] {}", app.status))
         .block(Block::default().borders(Borders::ALL).title("Status"));
     frame.render_widget(status, area);
 }
