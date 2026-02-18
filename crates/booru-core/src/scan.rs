@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use walkdir::WalkDir;
 
-use crate::alias::ALIAS_FILE_NAME;
+use crate::alias::{
+    expand_search_terms_with_aliases, load_alias_map_from_roots, normalize_search_terms,
+    AliasWarning, ALIAS_FILE_NAME,
+};
 use crate::config::BooruConfig;
 use crate::error::BooruError;
 use crate::metadata::{
@@ -458,6 +461,34 @@ pub struct Library {
     pub warnings: Vec<ScanWarning>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct SearchQuery {
+    pub terms: Vec<String>,
+    pub use_aliases: bool,
+}
+
+impl SearchQuery {
+    pub fn new(terms: Vec<String>) -> Self {
+        Self {
+            terms,
+            use_aliases: false,
+        }
+    }
+
+    pub fn with_aliases(mut self, use_aliases: bool) -> Self {
+        self.use_aliases = use_aliases;
+        self
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SearchResult {
+    pub normalized_terms: Vec<String>,
+    pub expanded_terms: Vec<String>,
+    pub indices: Vec<usize>,
+    pub alias_warnings: Vec<AliasWarning>,
+}
+
 impl Library {
     pub fn scan(config: BooruConfig) -> Result<Self, BooruError> {
         let report = scan_roots(&config.roots)?;
@@ -471,6 +502,64 @@ impl Library {
     pub fn resolve_image_path(&self, input: &Path) -> PathBuf {
         resolve_image_path(input, &self.config.roots)
     }
+
+    pub fn search(&self, query: SearchQuery) -> SearchResult {
+        let normalized_terms = normalize_search_terms(query.terms);
+
+        let (expanded_terms, alias_warnings) = if query.use_aliases {
+            let (alias_map, warnings) = load_alias_map_from_roots(&self.config.roots);
+            (
+                expand_search_terms_with_aliases(normalized_terms.clone(), &alias_map),
+                warnings,
+            )
+        } else {
+            (normalized_terms.clone(), Vec::new())
+        };
+
+        let indices = self
+            .index
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, item)| {
+                item_matches_search_terms(item, &expanded_terms).then_some(idx)
+            })
+            .collect();
+
+        SearchResult {
+            normalized_terms,
+            expanded_terms,
+            indices,
+            alias_warnings,
+        }
+    }
+}
+
+pub fn item_matches_search_terms(item: &ImageItem, terms: &[String]) -> bool {
+    if terms.is_empty() {
+        return true;
+    }
+
+    let tags = item
+        .merged_tags()
+        .into_iter()
+        .map(|tag| tag.to_lowercase())
+        .collect::<Vec<_>>();
+    let author = item.merged_author().map(|author| author.to_lowercase());
+    let detail = item.merged_detail().map(|detail| detail.to_lowercase());
+
+    terms.iter().any(|term| {
+        let needle = term.to_lowercase();
+        tags.iter().any(|tag| tag.contains(&needle))
+            || author
+                .as_ref()
+                .map(|author| author.contains(&needle))
+                .unwrap_or(false)
+            || detail
+                .as_ref()
+                .map(|detail| detail.contains(&needle))
+                .unwrap_or(false)
+    })
 }
 
 pub fn scan_roots(roots: &[PathBuf]) -> Result<ScanReport, BooruError> {
@@ -592,7 +681,8 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{scan_roots, ImageItem};
+    use super::{scan_roots, ImageItem, Index, Library, SearchQuery};
+    use crate::config::BooruConfig;
     use crate::metadata::BooruEdits;
 
     fn make_item(original: serde_json::Value) -> ImageItem {
@@ -764,6 +854,78 @@ mod tests {
             "tags_artist": ["myowa"]
         }));
         assert_eq!(item.merged_author().as_deref(), Some("myowa"));
+    }
+
+    #[test]
+    fn library_search_expands_aliases_when_enabled() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("lightbooru-search-alias-on-{unique}"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("alias.json"),
+            "[[\"yurucamp\", \"ゆるキャン\", \"摇曳露营\"]]",
+        )
+        .unwrap();
+
+        let mut index = Index::default();
+        index.items.push(make_item(json!({
+            "tags": ["ゆるキャン"],
+        })));
+
+        let library = Library {
+            config: BooruConfig {
+                roots: vec![root.clone()],
+            },
+            index,
+            warnings: Vec::new(),
+        };
+
+        let result =
+            library.search(SearchQuery::new(vec!["yurucamp".to_string()]).with_aliases(true));
+        assert_eq!(result.indices, vec![0]);
+        assert!(result.alias_warnings.is_empty());
+        assert!(result.expanded_terms.contains(&"ゆるキャン".to_string()));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn library_search_does_not_expand_aliases_when_disabled() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("lightbooru-search-alias-off-{unique}"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("alias.json"),
+            "[[\"yurucamp\", \"ゆるキャン\", \"摇曳露营\"]]",
+        )
+        .unwrap();
+
+        let mut index = Index::default();
+        index.items.push(make_item(json!({
+            "tags": ["ゆるキャン"],
+        })));
+
+        let library = Library {
+            config: BooruConfig {
+                roots: vec![root.clone()],
+            },
+            index,
+            warnings: Vec::new(),
+        };
+
+        let result =
+            library.search(SearchQuery::new(vec!["yurucamp".to_string()]).with_aliases(false));
+        assert!(result.indices.is_empty());
+        assert!(result.alias_warnings.is_empty());
+        assert_eq!(result.expanded_terms, vec!["yurucamp".to_string()]);
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

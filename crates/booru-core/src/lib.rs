@@ -26,4 +26,7 @@ pub use metadata::{extract_string_field, extract_tags, BooruEdits, EditUpdate, T
 pub use path::{
     booru_path_for_image, metadata_path_for_image, normalize_image_path, resolve_image_path,
 };
-pub use scan::{scan_roots, ImageItem, Index, Library, ScanReport, ScanWarning};
+pub use scan::{
+    item_matches_search_terms, scan_roots, ImageItem, Index, Library, ScanReport, ScanWarning,
+    SearchQuery, SearchResult,
+};

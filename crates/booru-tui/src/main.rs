@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use booru_core::{apply_update_to_image, BooruConfig, EditUpdate, ImageItem, Library};
+use booru_core::{apply_update_to_image, BooruConfig, EditUpdate, Library, SearchQuery};
 use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
@@ -107,20 +107,14 @@ impl App {
             let path = self.library.index.items[idx].image_path.clone();
             preview.load_for_path(&path);
         }
-        self.status = format!("{}", self.status);
         self.preview = Some(preview);
     }
 
     fn rebuild_filter(&mut self) {
-        let terms = split_terms(&self.search_input);
-        self.filtered_indices = self
+        let search = self
             .library
-            .index
-            .items
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, item)| item_matches_terms(item, &terms).then_some(idx))
-            .collect();
+            .search(SearchQuery::new(split_search_terms(&self.search_input)).with_aliases(true));
+        self.filtered_indices = search.indices;
 
         if self.filtered_indices.is_empty() {
             self.selected = 0;
@@ -214,15 +208,6 @@ impl App {
     }
 }
 
-fn split_terms(input: &str) -> Vec<String> {
-    input
-        .split_whitespace()
-        .map(str::trim)
-        .filter(|term| !term.is_empty())
-        .map(|term| term.to_lowercase())
-        .collect()
-}
-
 fn parse_tags(input: &str) -> Vec<String> {
     let normalized = input.replace(',', " ");
     normalized
@@ -233,30 +218,17 @@ fn parse_tags(input: &str) -> Vec<String> {
         .collect()
 }
 
-fn load_image(path: &Path) -> Result<DynamicImage> {
-    image::open(path).with_context(|| format!("unable to decode {}", path.display()))
+fn split_search_terms(input: &str) -> Vec<String> {
+    input
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .map(ToString::to_string)
+        .collect()
 }
 
-fn item_matches_terms(item: &ImageItem, terms: &[String]) -> bool {
-    if terms.is_empty() {
-        return true;
-    }
-
-    let tags = item
-        .merged_tags()
-        .into_iter()
-        .map(|tag| tag.to_lowercase())
-        .collect::<Vec<_>>();
-    let author = item.merged_author().unwrap_or_default().to_lowercase();
-    let detail = item.merged_detail().unwrap_or_default().to_lowercase();
-    let path = item.image_path.to_string_lossy().to_lowercase();
-
-    terms.iter().all(|needle| {
-        tags.iter().any(|tag| tag.contains(needle))
-            || author.contains(needle)
-            || detail.contains(needle)
-            || path.contains(needle)
-    })
+fn load_image(path: &Path) -> Result<DynamicImage> {
+    image::open(path).with_context(|| format!("unable to decode {}", path.display()))
 }
 
 fn main() -> Result<()> {
@@ -429,6 +401,9 @@ fn render_main_panel(frame: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn render_list_panel(frame: &mut Frame, area: Rect, app: &App) {
+    let total = app.filtered_indices.len();
+    let current = if total == 0 { 0 } else { app.selected + 1 };
+
     let items = app
         .filtered_indices
         .iter()
@@ -450,7 +425,7 @@ fn render_list_panel(frame: &mut Frame, area: Rect, app: &App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(format!("Images ({})", app.filtered_indices.len())),
+                .title(format!("Images ({current}/{total})")),
         )
         .highlight_symbol("> ")
         .highlight_style(Style::default().add_modifier(Modifier::BOLD));

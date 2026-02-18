@@ -6,11 +6,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use booru_core::{
-    alias_path_for_root, apply_update_to_image, compute_hashes_with_cache,
-    expand_search_terms_with_aliases, group_duplicates, load_alias_groups_from_root,
-    load_alias_map_from_roots, merge_alias_terms, metadata_path_for_image, normalize_search_terms,
-    remove_alias_terms, resolve_image_path, save_alias_groups_to_root, BooruConfig, EditUpdate,
-    FuzzyHashAlgorithm, HashCache, ImageItem, Library, ProgressObserver,
+    alias_path_for_root, apply_update_to_image, compute_hashes_with_cache, group_duplicates,
+    load_alias_groups_from_root, merge_alias_terms, metadata_path_for_image,
+    normalize_search_terms, remove_alias_terms, resolve_image_path, save_alias_groups_to_root,
+    BooruConfig, EditUpdate, FuzzyHashAlgorithm, HashCache, Library, ProgressObserver, SearchQuery,
 };
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
@@ -478,22 +477,21 @@ fn search_command(
     quiet: bool,
 ) -> Result<()> {
     let library = scan_library(config, quiet)?;
-    let query_terms = normalize_search_terms(terms);
-    if query_terms.is_empty() {
+    let search = library.search(SearchQuery::new(terms).with_aliases(true));
+
+    if search.normalized_terms.is_empty() {
         return Err(anyhow!("no search terms provided"));
     }
-    let (alias_map, alias_warnings) = load_alias_map_from_roots(&config.roots);
     if !quiet {
-        for warning in alias_warnings {
+        for warning in search.alias_warnings {
             eprintln!("warning: {}: {}", warning.path.display(), warning.message);
         }
     }
-    let expanded_terms = expand_search_terms_with_aliases(query_terms, &alias_map);
 
-    let mut results = library
-        .index
+    let mut results = search
+        .indices
         .iter()
-        .filter(|item| item_matches_search_terms(item, &expanded_terms))
+        .filter_map(|idx| library.index.items.get(*idx))
         .collect::<Vec<_>>();
     results.sort_by_key(|item| item.image_path.clone());
     for item in results.into_iter().take(limit) {
@@ -721,29 +719,6 @@ fn flatten_tag_args(tags: Vec<String>) -> Vec<String> {
     out
 }
 
-fn item_matches_search_terms(item: &ImageItem, terms: &[String]) -> bool {
-    let tags = item
-        .merged_tags()
-        .into_iter()
-        .map(|tag| tag.to_lowercase())
-        .collect::<Vec<_>>();
-    let author = item.merged_author().map(|author| author.to_lowercase());
-    let detail = item.merged_detail().map(|detail| detail.to_lowercase());
-
-    terms.iter().any(|term| {
-        let needle = term.to_lowercase();
-        tags.iter().any(|tag| tag.contains(&needle))
-            || author
-                .as_ref()
-                .map(|author| author.contains(&needle))
-                .unwrap_or(false)
-            || detail
-                .as_ref()
-                .map(|detail| detail.contains(&needle))
-                .unwrap_or(false)
-    })
-}
-
 struct HashProgress {
     pb: ProgressBar,
 }
@@ -827,7 +802,9 @@ mod tests {
     use chrono::{Local, TimeZone, Utc};
     use serde_json::json;
 
-    use super::{format_date_string, item_matches_search_terms};
+    use booru_core::item_matches_search_terms;
+
+    use super::format_date_string;
 
     fn make_item(original: serde_json::Value) -> booru_core::ImageItem {
         booru_core::ImageItem {
