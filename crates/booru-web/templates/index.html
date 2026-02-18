@@ -192,6 +192,12 @@
       font-size: .86rem;
     }
 
+    .author-link {
+      color: #0c5d66;
+      text-decoration: none;
+      font-weight: 600;
+    }
+
     .desc {
       margin: 0 0 8px;
       color: #243a3d;
@@ -339,9 +345,17 @@
             <div class="card-body">
               <a class="card-main" href="{{ item.detail_href }}">
               <h2 class="title">{{ item.title }}</h2>
-              <p class="sub">{{ item.author }} · {{ item.date }}{% if item.sensitive %}<span class="sensitive">SENSITIVE</span>{% endif %}</p>
               <p class="desc">{{ item.detail }}</p>
               </a>
+              <p class="sub">
+                {% match item.author_href %}
+                  {% when Some with (href) %}
+                    <a class="author-link" href="{{ href }}">{{ item.author }}</a>
+                  {% when None %}
+                    {{ item.author }}
+                {% endmatch %}
+                · {{ item.date }}{% if item.sensitive %}<span class="sensitive">SENSITIVE</span>{% endif %}
+              </p>
               <div class="tags">
                 {% for tag in item.tags %}
                   <a class="tag" href="{{ tag.href }}">{{ tag.label }}</a>

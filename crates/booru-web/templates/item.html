@@ -105,6 +105,11 @@
 
     .meta { color: var(--ink-soft); font-size: .92rem; margin: 0 0 10px; }
     .sensitive { color: var(--warn); font-weight: 700; }
+    .author-link {
+      color: #0c5d66;
+      text-decoration: none;
+      font-weight: 600;
+    }
 
     .detail {
       white-space: pre-wrap;
@@ -202,7 +207,13 @@
         <div class="pad">
           <h1>{{ title }}</h1>
           <p class="meta">
-            {{ author }} · {{ date }}
+            {% match author_href %}
+              {% when Some with (href) %}
+                <a class="author-link" href="{{ href }}">{{ author }}</a>
+              {% when None %}
+                {{ author }}
+            {% endmatch %}
+            · {{ date }}
             {% if sensitive %}<span class="sensitive"> · SENSITIVE</span>{% endif %}
           </p>
           <div class="detail">{{ detail }}</div>

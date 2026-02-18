@@ -76,6 +76,7 @@ struct GridItem {
     detail_href: String,
     title: String,
     author: String,
+    author_href: Option<String>,
     date: String,
     detail: String,
     tags: Vec<TagLink>,
@@ -115,6 +116,7 @@ struct ItemTemplate {
     back_href: String,
     title: String,
     author: String,
+    author_href: Option<String>,
     date: String,
     detail: String,
     sensitive: bool,
@@ -356,6 +358,9 @@ async fn item_handler(
         limit,
         page: 1,
     };
+    let author = item
+        .merged_author()
+        .unwrap_or_else(|| "(unknown)".to_string());
 
     let original_json =
         serde_json::to_string_pretty(&item.original).unwrap_or_else(|_| "{}".to_string());
@@ -365,9 +370,8 @@ async fn item_handler(
         id,
         back_href,
         title: infer_title(item),
-        author: item
-            .merged_author()
-            .unwrap_or_else(|| "(unknown)".to_string()),
+        author: author.clone(),
+        author_href: build_author_search_href(&author, &tag_nav),
         date: item
             .merged_date()
             .unwrap_or_else(|| "(unknown)".to_string()),
@@ -415,13 +419,15 @@ async fn media_handler(State(state): State<AppState>, Path(id): Path<usize>) -> 
 }
 
 fn to_grid_item(id: usize, item: &booru_core::ImageItem, nav: &IndexNav) -> GridItem {
+    let author = item
+        .merged_author()
+        .unwrap_or_else(|| "(unknown)".to_string());
     GridItem {
         id,
         detail_href: build_item_href(id, nav),
         title: infer_title(item),
-        author: item
-            .merged_author()
-            .unwrap_or_else(|| "(unknown)".to_string()),
+        author: author.clone(),
+        author_href: build_author_search_href(&author, nav),
         date: item
             .merged_date()
             .unwrap_or_else(|| "(unknown)".to_string()),
@@ -531,8 +537,20 @@ fn build_index_query_string(nav: &IndexNav) -> String {
 }
 
 fn build_tag_search_href(tag: &str, nav: &IndexNav) -> String {
+    build_term_search_href(tag, nav)
+}
+
+fn build_author_search_href(author: &str, nav: &IndexNav) -> Option<String> {
+    let trimmed = author.trim();
+    if trimmed.is_empty() || trimmed == "(unknown)" {
+        return None;
+    }
+    Some(build_term_search_href(trimmed, nav))
+}
+
+fn build_term_search_href(term: &str, nav: &IndexNav) -> String {
     let tag_nav = IndexNav {
-        query: tag.to_string(),
+        query: term.to_string(),
         show_sensitive: nav.show_sensitive,
         randomize: nav.randomize,
         seed: nav.seed,
