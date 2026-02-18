@@ -934,6 +934,13 @@ fn render_preview_panel(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    if app.dragging_split {
+        let text = Paragraph::new("Resizing preview... release mouse to redraw.")
+            .wrap(Wrap { trim: false });
+        frame.render_widget(text, inner);
+        return;
+    }
+
     let Some(path) = image_path else {
         let text = Paragraph::new(fallback).wrap(Wrap { trim: false });
         frame.render_widget(text, inner);
