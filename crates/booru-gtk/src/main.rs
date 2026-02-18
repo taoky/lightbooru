@@ -2,15 +2,16 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
+use adw::prelude::*;
+use adw::{Application, ApplicationWindow};
 use anyhow::Result;
 use booru_core::{
     apply_update_to_image, BooruConfig, EditUpdate, Library, SearchQuery, SearchSort,
 };
 use clap::Parser;
-use gtk::prelude::*;
 use gtk::{
-    self, Align, Application, ApplicationWindow, Box as GtkBox, Button, CheckButton, Entry, Label,
-    ListBox, ListBoxRow, Orientation, Paned, Picture, ScrolledWindow, SearchEntry, SelectionMode,
+    self, Align, Box as GtkBox, Button, CheckButton, Entry, Label, ListBox, ListBoxRow,
+    Orientation, Paned, Picture, ScrolledWindow, SearchEntry, SelectionMode,
 };
 
 #[derive(Parser, Debug)]
@@ -131,7 +132,7 @@ fn scan_library(config: &BooruConfig, quiet: bool) -> Result<Library> {
 fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
     let window = ApplicationWindow::builder()
         .application(app)
-        .title("lightbooru (gtk)")
+        .title("lightbooru")
         .default_width(1280)
         .default_height(800)
         .build();
@@ -223,7 +224,8 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
     root.append(&controls);
     root.append(&paned);
     root.append(&status);
-    window.set_child(Some(&root));
+
+    window.set_content(Some(&root));
 
     let ui = Ui {
         list,

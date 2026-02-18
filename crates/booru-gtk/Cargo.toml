@@ -9,3 +9,4 @@ anyhow.workspace = true
 clap.workspace = true
 booru-core = { path = "../booru-core" }
 gtk = { package = "gtk4", version = "0.8", features = ["v4_8"] }
+adw = { package = "libadwaita", version = "0.6" }
