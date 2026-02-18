@@ -523,19 +523,29 @@ fn run_event_loop(
             continue;
         }
 
-        match event::read()? {
-            Event::Key(key) => {
-                if handle_key_event(app, key)? {
-                    break;
-                }
+        if handle_input_event(app, event::read()?)? {
+            break;
+        }
+        while event::poll(Duration::from_millis(0))? {
+            if handle_input_event(app, event::read()?)? {
+                return Ok(());
             }
-            Event::Mouse(mouse) => handle_mouse_event(app, mouse),
-            Event::Resize(_, _) => {}
-            _ => {}
         }
     }
 
     Ok(())
+}
+
+fn handle_input_event(app: &mut App, event: Event) -> Result<bool> {
+    match event {
+        Event::Key(key) => handle_key_event(app, key),
+        Event::Mouse(mouse) => {
+            handle_mouse_event(app, mouse);
+            Ok(false)
+        }
+        Event::Resize(_, _) => Ok(false),
+        _ => Ok(false),
+    }
 }
 
 fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<bool> {
