@@ -4,6 +4,7 @@ members = [
   "crates/booru-core",
   "crates/booructl",
   "crates/booru-tui",
+  "crates/booru-web",
 ]
 
 [workspace.package]

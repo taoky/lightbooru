@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title }} - lightbooru web</title>
+  <style>
+    :root {
+      --paper: #f7f3e9;
+      --ink: #1a2427;
+      --ink-soft: #445b60;
+      --accent: #0a9396;
+      --line: #dcd1ba;
+      --card: #fffdf8;
+      --warn: #9b2226;
+      --shadow: rgba(22, 31, 33, 0.12);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: "IBM Plex Sans", "Noto Sans CJK SC", "Noto Sans", sans-serif;
+      background:
+        radial-gradient(1100px 420px at 100% -200px, #94d2bd4a, transparent 70%),
+        radial-gradient(940px 420px at -120px -220px, #ee9b0040, transparent 72%),
+        var(--paper);
+    }
+
+    .wrap {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 20px;
+      display: grid;
+      gap: 14px;
+    }
+
+    .top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: linear-gradient(125deg, #fffcf4 0%, #f2fffc 100%);
+      padding: 12px 14px;
+      box-shadow: 0 8px 18px var(--shadow);
+    }
+
+    .back {
+      color: var(--ink-soft);
+      text-decoration: none;
+      border: 1px solid var(--line);
+      background: #fffdf8;
+      padding: 6px 10px;
+      border-radius: 8px;
+    }
+
+    .main {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 360px;
+      gap: 14px;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--card);
+      box-shadow: 0 8px 18px var(--shadow);
+      overflow: hidden;
+    }
+
+    .image-wrap {
+      min-height: 220px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #f2ead8;
+    }
+
+    .image-wrap img {
+      width: 100%;
+      height: auto;
+      display: block;
+      max-height: 76vh;
+      object-fit: contain;
+    }
+
+    .pad { padding: 12px 14px; }
+
+    h1 {
+      margin: 0 0 6px;
+      font-size: clamp(1.2rem, 2vw, 1.6rem);
+      line-height: 1.25;
+      overflow-wrap: anywhere;
+    }
+
+    .meta { color: var(--ink-soft); font-size: .92rem; margin: 0 0 10px; }
+    .sensitive { color: var(--warn); font-weight: 700; }
+
+    .detail {
+      white-space: pre-wrap;
+      line-height: 1.35;
+      font-size: .95rem;
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+      margin-top: 10px;
+      overflow-wrap: anywhere;
+    }
+
+    .section-title {
+      margin: 0 0 8px;
+      font-size: .88rem;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      color: var(--ink-soft);
+    }
+
+    .tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 12px;
+    }
+
+    .tag {
+      font-size: .78rem;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: #cdeee7;
+      color: #0d3b3f;
+      text-decoration: none;
+      display: inline-block;
+    }
+
+    .meta-block { margin-bottom: 12px; }
+    .meta-block a { color: #005f73; text-decoration: none; overflow-wrap: anywhere; }
+
+    .readonly {
+      border-top: 1px dashed var(--line);
+      padding-top: 12px;
+      margin-top: 12px;
+    }
+
+    fieldset {
+      border: 0;
+      margin: 0;
+      padding: 0;
+      display: grid;
+      gap: 8px;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 70px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px;
+      font-family: "IBM Plex Mono", "JetBrains Mono", monospace;
+      background: #f8f4e9;
+    }
+
+    pre {
+      margin: 0;
+      padding: 10px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: #f7f2e5;
+      overflow: auto;
+      font-size: .77rem;
+      line-height: 1.3;
+      font-family: "IBM Plex Mono", "JetBrains Mono", monospace;
+    }
+
+    @media (max-width: 980px) {
+      .main { grid-template-columns: 1fr; }
+      .wrap { padding: 12px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <header class="top">
+      <a class="back" href="{{ back_href }}">Back to gallery</a>
+      <span>#{{ id }}</span>
+    </header>
+
+    <section class="main">
+      <article class="panel">
+        <div class="image-wrap">
+          <img src="/media/{{ id }}" alt="{{ title }}">
+        </div>
+        <div class="pad">
+          <h1>{{ title }}</h1>
+          <p class="meta">
+            {{ author }} · {{ date }}
+            {% if sensitive %}<span class="sensitive"> · SENSITIVE</span>{% endif %}
+          </p>
+          <div class="detail">{{ detail }}</div>
+        </div>
+      </article>
+
+      <aside class="panel pad">
+        <div class="meta-block">
+          <h2 class="section-title">Tags</h2>
+          <div class="tags">
+            {% for tag in tags %}
+              <a class="tag" href="{{ tag.href }}">{{ tag.label }}</a>
+            {% endfor %}
+          </div>
+        </div>
+
+        <div class="meta-block">
+          <h2 class="section-title">Source</h2>
+          {% match platform_url %}
+            {% when Some with (url) %}
+              <a href="{{ url }}" target="_blank" rel="noreferrer">{{ url }}</a>
+            {% when None %}
+              <span>(none)</span>
+          {% endmatch %}
+        </div>
+
+        <div class="readonly">
+          <h2 class="section-title">Edit (Read-only)</h2>
+          <fieldset disabled>
+            <textarea placeholder="add tags or notes..."></textarea>
+            <label><input type="checkbox"> Sensitive</label>
+            <button type="button">Save (disabled)</button>
+          </fieldset>
+        </div>
+      </aside>
+    </section>
+
+    <section class="panel pad">
+      <h2 class="section-title">Merged booru edit JSON</h2>
+      <pre>{{ edits_json }}</pre>
+    </section>
+
+    <section class="panel pad">
+      <h2 class="section-title">Original metadata JSON</h2>
+      <pre>{{ original_json }}</pre>
+    </section>
+  </main>
+</body>
+</html>

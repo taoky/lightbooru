@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>lightbooru web</title>
+  <style>
+    :root {
+      --paper: #f5f2e8;
+      --ink: #102022;
+      --ink-soft: #3b4f53;
+      --accent: #006d77;
+      --accent-soft: #83c5be;
+      --warn: #9b2226;
+      --card: #fffcf2;
+      --line: #d8cfb8;
+      --shadow: rgba(16, 32, 34, 0.12);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: "IBM Plex Sans", "Noto Sans CJK SC", "Noto Sans", sans-serif;
+      background:
+        radial-gradient(1200px 420px at 85% -120px, #f0c27b44, transparent 68%),
+        radial-gradient(900px 360px at -120px -100px, #83c5be44, transparent 72%),
+        var(--paper);
+    }
+
+    .wrap {
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 20px;
+      animation: rise-in 280ms ease-out;
+    }
+
+    .hero {
+      border: 1px solid var(--line);
+      background: linear-gradient(125deg, #fffefa 0%, #fff7df 52%, #eefbf9 100%);
+      border-radius: 16px;
+      padding: 18px;
+      box-shadow: 0 10px 20px var(--shadow);
+    }
+
+    h1 {
+      margin: 0 0 6px;
+      font-size: clamp(1.4rem, 2.6vw, 2rem);
+      letter-spacing: .01em;
+    }
+
+    .meta {
+      margin: 0 0 14px;
+      color: var(--ink-soft);
+      font-size: .95rem;
+    }
+
+    .search {
+      display: grid;
+      grid-template-columns: 1fr auto auto auto;
+      gap: 10px;
+      align-items: center;
+    }
+
+    input[type="text"], input[type="number"] {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+      background: #fffcf4;
+      color: var(--ink);
+      font-size: 1rem;
+    }
+
+    button {
+      border: 1px solid transparent;
+      border-radius: 10px;
+      padding: 10px 14px;
+      background: var(--accent);
+      color: #f7fffd;
+      cursor: pointer;
+      font-weight: 700;
+      letter-spacing: .01em;
+    }
+
+    button:hover { background: #005963; }
+
+    .toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fffcf4;
+      color: var(--ink-soft);
+      font-size: .92rem;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 14px;
+      margin-top: 18px;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      overflow: hidden;
+      background: var(--card);
+      box-shadow: 0 6px 14px var(--shadow);
+      transform: translateY(4px);
+      opacity: 0;
+      animation: card-in 260ms ease-out forwards;
+    }
+
+    .card:hover {
+      transform: translateY(-2px);
+      transition: transform 130ms ease-out;
+    }
+
+    .card img {
+      width: 100%;
+      height: 210px;
+      object-fit: cover;
+      display: block;
+      border-bottom: 1px solid var(--line);
+      background: #efe7d2;
+    }
+
+    .card-body { padding: 10px 12px 12px; }
+    .card-main {
+      text-decoration: none;
+      color: inherit;
+      display: block;
+    }
+    .title {
+      margin: 0 0 6px;
+      font-size: .98rem;
+      font-weight: 700;
+      line-height: 1.25;
+      overflow-wrap: anywhere;
+    }
+
+    .sub {
+      margin: 0 0 6px;
+      color: var(--ink-soft);
+      font-size: .86rem;
+    }
+
+    .desc {
+      margin: 0 0 8px;
+      color: #243a3d;
+      font-size: .86rem;
+      line-height: 1.3;
+      min-height: 2.4em;
+      overflow-wrap: anywhere;
+    }
+
+    .tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .tag {
+      font-size: .75rem;
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: #0f3a3d;
+      text-decoration: none;
+      display: inline-block;
+    }
+
+    .sensitive {
+      margin-left: 6px;
+      color: var(--warn);
+      font-weight: 700;
+      font-size: .75rem;
+    }
+
+    .empty {
+      margin-top: 16px;
+      padding: 20px;
+      border: 1px dashed var(--line);
+      border-radius: 12px;
+      background: #fffcf4;
+      color: var(--ink-soft);
+      text-align: center;
+    }
+
+    .pager {
+      margin-top: 14px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fffcf4;
+      padding: 10px;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+    }
+
+    .pager-meta {
+      color: var(--ink-soft);
+      font-size: .9rem;
+    }
+
+    .pager-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .pager-actions form {
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+      margin: 0;
+    }
+
+    @keyframes rise-in {
+      from { opacity: .8; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @keyframes card-in {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @media (max-width: 760px) {
+      .search { grid-template-columns: 1fr; }
+      .wrap { padding: 14px; }
+      .card img { height: 180px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="hero">
+      <h1>lightbooru web</h1>
+      <p class="meta">Showing {{ shown_count }} / {{ total_matches }} matches · Page {{ page }} / {{ total_pages }}</p>
+      <form class="search" method="get" action="/">
+        <input type="hidden" name="page" value="1">
+        <input type="text" name="q" value="{{ query }}" placeholder="Search tags / author / description">
+        <label class="toggle">
+          <input type="checkbox" name="show_sensitive" value="1" {% if show_sensitive %}checked{% endif %}>
+          Show sensitive
+        </label>
+        <input type="number" name="limit" min="1" max="1000" value="{{ limit }}" title="Max shown items">
+        <button type="submit">Search</button>
+      </form>
+    </section>
+
+    {% if items.len() == 0 %}
+      <section class="empty">No images matched current filters.</section>
+    {% else %}
+      <section class="grid">
+        {% for item in items %}
+          <article class="card">
+            <a class="card-main" href="{{ item.detail_href }}">
+              <img src="/media/{{ item.id }}" loading="lazy" alt="{{ item.title }}">
+            </a>
+            <div class="card-body">
+              <a class="card-main" href="{{ item.detail_href }}">
+              <h2 class="title">{{ item.title }}</h2>
+              <p class="sub">{{ item.author }} · {{ item.date }}{% if item.sensitive %}<span class="sensitive">SENSITIVE</span>{% endif %}</p>
+              <p class="desc">{{ item.detail }}</p>
+              </a>
+              <div class="tags">
+                {% for tag in item.tags %}
+                  <a class="tag" href="{{ tag.href }}">{{ tag.label }}</a>
+                {% endfor %}
+              </div>
+            </div>
+          </article>
+        {% endfor %}
+      </section>
+
+      <section class="pager">
+        <div class="pager-meta">
+          Showing items {{ start_item }} - {{ end_item }}
+        </div>
+        <div class="pager-actions">
+          {% match prev_page %}
+            {% when Some with (p) %}
+              <form method="get" action="/">
+                <input type="hidden" name="q" value="{{ query }}">
+                <input type="hidden" name="limit" value="{{ limit }}">
+                <input type="hidden" name="page" value="{{ p }}">
+                {% if show_sensitive %}<input type="hidden" name="show_sensitive" value="1">{% endif %}
+                <button type="submit">Prev</button>
+              </form>
+            {% when None %}
+          {% endmatch %}
+
+          {% match next_page %}
+            {% when Some with (p) %}
+              <form method="get" action="/">
+                <input type="hidden" name="q" value="{{ query }}">
+                <input type="hidden" name="limit" value="{{ limit }}">
+                <input type="hidden" name="page" value="{{ p }}">
+                {% if show_sensitive %}<input type="hidden" name="show_sensitive" value="1">{% endif %}
+                <button type="submit">Next</button>
+              </form>
+            {% when None %}
+          {% endmatch %}
+
+          <form method="get" action="/">
+            <input type="hidden" name="q" value="{{ query }}">
+            <input type="hidden" name="limit" value="{{ limit }}">
+            {% if show_sensitive %}<input type="hidden" name="show_sensitive" value="1">{% endif %}
+            <label class="toggle">Page <input type="number" name="page" min="1" max="{{ total_pages }}" value="{{ page }}"></label>
+            <button type="submit">Go</button>
+          </form>
+        </div>
+      </section>
+    {% endif %}
+  </main>
+</body>
+</html>
