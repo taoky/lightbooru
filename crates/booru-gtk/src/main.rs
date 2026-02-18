@@ -5,8 +5,8 @@ use std::rc::Rc;
 use adw::prelude::*;
 use adw::{
     ActionRow, Application, ApplicationWindow, Banner, Clamp, EntryRow, HeaderBar, NavigationPage,
-    NavigationSplitView, StatusPage, SwitchRow, Toast, ToastOverlay, ToolbarView, ViewStack,
-    WindowTitle,
+    NavigationSplitView, StatusPage, SwitchRow, Toast, ToastOverlay, Toggle, ToggleGroup,
+    ToolbarView, ViewStack, WindowTitle,
 };
 use anyhow::Result;
 use booru_core::{
@@ -14,8 +14,8 @@ use booru_core::{
 };
 use clap::Parser;
 use gtk::{
-    self, Align, Box as GtkBox, Button, Label, ListBox, Orientation, Picture, ScrolledWindow,
-    SearchEntry, SelectionMode,
+    self, Align, Box as GtkBox, Button, FlowBox, Label, ListBox, Orientation, Picture,
+    ScrolledWindow, SearchEntry, SelectionMode,
 };
 
 #[derive(Parser, Debug)]
@@ -34,10 +34,33 @@ struct Cli {
     sensitive: bool,
 }
 
+#[derive(Clone, Copy)]
+enum BrowserMode {
+    List,
+    Grid,
+}
+
+impl BrowserMode {
+    fn as_name(self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Grid => "grid",
+        }
+    }
+
+    fn from_name(name: &str) -> Self {
+        match name {
+            "grid" => Self::Grid,
+            _ => Self::List,
+        }
+    }
+}
+
 struct AppState {
     library: Library,
     filtered_indices: Vec<usize>,
     selected_pos: Option<usize>,
+    browser_mode: BrowserMode,
     show_sensitive: bool,
     query: String,
     quiet: bool,
@@ -49,6 +72,7 @@ impl AppState {
             library,
             filtered_indices: Vec::new(),
             selected_pos: None,
+            browser_mode: BrowserMode::List,
             show_sensitive,
             query: String::new(),
             quiet,
@@ -88,6 +112,8 @@ impl AppState {
 #[derive(Clone)]
 struct Ui {
     list: ListBox,
+    grid: FlowBox,
+    browser_stack: ViewStack,
     picture: Picture,
     title: Label,
     author: Label,
@@ -168,6 +194,26 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
     search_button.set_tooltip_text(Some("Search"));
     header.pack_start(&search_button);
 
+    let browse_mode_group = ToggleGroup::new();
+    browse_mode_group.set_can_shrink(true);
+    browse_mode_group.set_homogeneous(true);
+    browse_mode_group.add(
+        Toggle::builder()
+            .name("list")
+            .icon_name("view-list-symbolic")
+            .tooltip("List mode")
+            .build(),
+    );
+    browse_mode_group.add(
+        Toggle::builder()
+            .name("grid")
+            .icon_name("view-grid-symbolic")
+            .tooltip("Thumbnail mode")
+            .build(),
+    );
+    browse_mode_group.set_active_name(Some(state.borrow().browser_mode.as_name()));
+    header.pack_start(&browse_mode_group);
+
     let main_menu = gtk::gio::Menu::new();
     main_menu.append(Some("Show sensitive"), Some("win.show-sensitive"));
     main_menu.append(Some("Rescan library"), Some("win.rescan"));
@@ -202,7 +248,29 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
     list_scroll.set_hexpand(true);
     list_scroll.set_vexpand(true);
     list_scroll.add_css_class("navigation-sidebar");
-    let sidebar_page = NavigationPage::new(&list_scroll, "Library");
+
+    let grid = FlowBox::new();
+    grid.set_selection_mode(SelectionMode::Single);
+    grid.set_activate_on_single_click(true);
+    grid.set_row_spacing(8);
+    grid.set_column_spacing(8);
+    grid.set_max_children_per_line(4);
+    grid.set_min_children_per_line(2);
+    grid.set_valign(Align::Start);
+    let grid_scroll = ScrolledWindow::new();
+    grid_scroll.set_child(Some(&grid));
+    grid_scroll.set_hexpand(true);
+    grid_scroll.set_vexpand(true);
+    grid_scroll.add_css_class("navigation-sidebar");
+
+    let browser_stack = ViewStack::new();
+    browser_stack.set_hhomogeneous(false);
+    browser_stack.set_vhomogeneous(false);
+    browser_stack.add_titled(&list_scroll, Some("list"), "List");
+    browser_stack.add_titled(&grid_scroll, Some("grid"), "Grid");
+    browser_stack.set_visible_child_name(state.borrow().browser_mode.as_name());
+
+    let sidebar_page = NavigationPage::new(&browser_stack, "Library");
     split.set_sidebar(Some(&sidebar_page));
 
     let detail_wrap = GtkBox::new(Orientation::Vertical, 12);
@@ -295,6 +363,8 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
 
     let ui = Ui {
         list,
+        grid,
+        browser_stack,
         picture,
         title,
         author,
@@ -308,6 +378,7 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
         banner,
     };
 
+    window.present();
     rebuild_view(&state, &ui);
 
     {
@@ -328,6 +399,28 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
             let enabled = bar.is_search_mode();
             if search_button.is_active() != enabled {
                 search_button.set_active(enabled);
+            }
+        });
+    }
+
+    {
+        let state_handle = state.clone();
+        let ui = ui.clone();
+        browse_mode_group.connect_active_name_notify(move |group| {
+            let mode = group
+                .active_name()
+                .as_deref()
+                .map(BrowserMode::from_name)
+                .unwrap_or(BrowserMode::List);
+            {
+                let mut state = state_handle.borrow_mut();
+                state.browser_mode = mode;
+            }
+            ui.browser_stack.set_visible_child_name(mode.as_name());
+            if matches!(mode, BrowserMode::Grid) {
+                refresh_grid(&state_handle, &ui);
+                let selected_pos = state_handle.borrow().selected_pos;
+                sync_browser_selection(&ui, selected_pos);
             }
         });
     }
@@ -375,10 +468,33 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
         let list_handle = ui.list.clone();
         list_handle.connect_row_selected(move |_list, row| {
             let mut state = state_handle.borrow_mut();
-            state.selected_pos = row
+            let selected_pos = row
                 .and_then(|row| usize::try_from(row.index()).ok())
                 .filter(|pos| *pos < state.filtered_indices.len());
+            state.selected_pos = selected_pos;
             drop(state);
+            sync_browser_selection(&ui, selected_pos);
+            refresh_detail(&state_handle, &ui);
+        });
+    }
+
+    {
+        let state_handle = state.clone();
+        let ui = ui.clone();
+        let grid_handle = ui.grid.clone();
+        grid_handle.connect_selected_children_changed(move |grid| {
+            let selected_pos = grid
+                .selected_children()
+                .into_iter()
+                .next()
+                .and_then(|child| usize::try_from(child.index()).ok());
+
+            {
+                let mut state = state_handle.borrow_mut();
+                state.selected_pos = selected_pos.filter(|pos| *pos < state.filtered_indices.len());
+            }
+
+            sync_browser_selection(&ui, selected_pos);
             refresh_detail(&state_handle, &ui);
         });
     }
@@ -406,12 +522,16 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
         });
         window.add_action(&rescan_action);
     }
-
-    window.present();
 }
 
 fn rebuild_view(state: &Rc<RefCell<AppState>>, ui: &Ui) {
+    let browser_mode = state.borrow().browser_mode;
+    ui.browser_stack
+        .set_visible_child_name(browser_mode.as_name());
     refresh_list(state, ui);
+    if matches!(browser_mode, BrowserMode::Grid) {
+        refresh_grid(state, ui);
+    }
     refresh_detail(state, ui);
 }
 
@@ -446,11 +566,71 @@ fn refresh_list(state: &Rc<RefCell<AppState>>, ui: &Ui) {
         ui.list.append(&row);
     }
 
-    if let Some(pos) = selected_pos {
-        if let Some(row) = ui.list.row_at_index(pos as i32) {
-            ui.list.select_row(Some(&row));
-        }
+    sync_browser_selection(ui, selected_pos);
+}
+
+fn refresh_grid(state: &Rc<RefCell<AppState>>, ui: &Ui) {
+    while let Some(child) = ui.grid.first_child() {
+        ui.grid.remove(&child);
     }
+
+    let (items, selected_pos) = {
+        let state = state.borrow();
+        let items = state
+            .filtered_indices
+            .iter()
+            .map(|item_idx| {
+                let item = &state.library.index.items[*item_idx];
+                (
+                    infer_thumbnail_title(item),
+                    item.image_path.clone(),
+                    item.merged_sensitive(),
+                )
+            })
+            .collect::<Vec<(String, PathBuf, bool)>>();
+        (items, state.selected_pos)
+    };
+
+    for (title, image_path, sensitive) in items {
+        let card = GtkBox::new(Orientation::Vertical, 6);
+        card.set_margin_start(6);
+        card.set_margin_end(6);
+        card.set_margin_top(6);
+        card.set_margin_bottom(6);
+
+        let thumb = Picture::new();
+        thumb.set_content_fit(gtk::ContentFit::Cover);
+        thumb.set_size_request(156, 156);
+        thumb.set_can_shrink(true);
+        thumb.set_halign(Align::Fill);
+        let load_path = image_path.clone();
+        thumb.connect_map(move |picture| {
+            picture.set_filename(Some(&load_path));
+        });
+        thumb.connect_unmap(move |picture| {
+            picture.set_paintable(Option::<&gtk::gdk::Texture>::None);
+        });
+
+        let caption = Label::new(Some(&title));
+        caption.set_wrap(false);
+        caption.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        caption.set_max_width_chars(20);
+        caption.set_xalign(0.0);
+        caption.add_css_class("caption");
+
+        card.append(&thumb);
+        card.append(&caption);
+
+        let tooltip = if sensitive {
+            format!("[Sensitive] {}", image_path.display())
+        } else {
+            image_path.display().to_string()
+        };
+        card.set_tooltip_text(Some(&tooltip));
+        ui.grid.append(&card);
+    }
+
+    sync_browser_selection(ui, selected_pos);
 }
 
 fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
@@ -605,6 +785,56 @@ fn infer_title(item: &booru_core::ImageItem) -> String {
                 .map(|name| name.to_string_lossy().to_string())
         })
         .unwrap_or_else(|| "(untitled)".to_string())
+}
+
+fn infer_thumbnail_title(item: &booru_core::ImageItem) -> String {
+    let base = infer_title(item);
+    if item.merged_sensitive() {
+        format!("[S] {base}")
+    } else {
+        base
+    }
+}
+
+fn sync_browser_selection(ui: &Ui, selected_pos: Option<usize>) {
+    let current_list_pos = ui
+        .list
+        .selected_row()
+        .and_then(|row| usize::try_from(row.index()).ok());
+    let current_grid_pos = ui
+        .grid
+        .selected_children()
+        .into_iter()
+        .next()
+        .and_then(|child| usize::try_from(child.index()).ok());
+
+    match selected_pos {
+        Some(pos) => {
+            if current_list_pos != Some(pos) {
+                if let Some(row) = ui.list.row_at_index(pos as i32) {
+                    ui.list.select_row(Some(&row));
+                } else {
+                    ui.list.unselect_all();
+                }
+            }
+
+            if current_grid_pos != Some(pos) {
+                if let Some(child) = ui.grid.child_at_index(pos as i32) {
+                    ui.grid.select_child(&child);
+                } else {
+                    ui.grid.unselect_all();
+                }
+            }
+        }
+        None => {
+            if current_list_pos.is_some() {
+                ui.list.unselect_all();
+            }
+            if current_grid_pos.is_some() {
+                ui.grid.unselect_all();
+            }
+        }
+    }
 }
 
 fn set_status(ui: &Ui, message: &str) {
