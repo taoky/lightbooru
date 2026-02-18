@@ -1,0 +1,11 @@
+[package]
+name = "booru-gtk"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+booru-core = { path = "../booru-core" }
+gtk = { package = "gtk4", version = "0.8", features = ["v4_8"] }
