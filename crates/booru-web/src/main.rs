@@ -60,6 +60,8 @@ struct IndexParams {
     show_sensitive: Option<String>,
     limit: Option<usize>,
     page: Option<usize>,
+    from: Option<usize>,
+    sy: Option<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -282,12 +284,23 @@ async fn item_handler(
         .unwrap_or(state.default_show_sensitive);
     let limit = params.limit.unwrap_or(state.default_limit).clamp(1, 1000);
     let page = params.page.unwrap_or(1).max(1);
-    let back_href = build_index_href(&IndexNav {
+    let mut back_href = build_index_href(&IndexNav {
         query: query_trimmed,
         show_sensitive,
         limit,
         page,
     });
+    if let Some(scroll_y) = params.sy {
+        if back_href.contains('?') {
+            back_href.push('&');
+        } else {
+            back_href.push('?');
+        }
+        back_href.push_str(&format!("sy={scroll_y}"));
+    }
+    if let Some(from_id) = params.from {
+        back_href.push_str(&format!("#item-{from_id}"));
+    }
     let tag_nav = IndexNav {
         query: String::new(),
         show_sensitive,
@@ -428,9 +441,9 @@ struct IndexNav {
 fn build_item_href(id: usize, nav: &IndexNav) -> String {
     let query = build_index_query_string(nav);
     if query.is_empty() {
-        format!("/items/{id}")
+        format!("/items/{id}?from={id}")
     } else {
-        format!("/items/{id}?{query}")
+        format!("/items/{id}?{query}&from={id}")
     }
 }
 

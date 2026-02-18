@@ -261,7 +261,7 @@
     {% else %}
       <section class="grid">
         {% for item in items %}
-          <article class="card">
+          <article class="card" id="item-{{ item.id }}">
             <a class="card-main" href="{{ item.detail_href }}">
               <img src="/media/{{ item.id }}" loading="lazy" alt="{{ item.title }}">
             </a>
@@ -321,5 +321,31 @@
       </section>
     {% endif %}
   </main>
+  <script>
+    (function () {
+      const currentUrl = new URL(window.location.href);
+      const sy = currentUrl.searchParams.get("sy");
+      if (sy !== null) {
+        const y = Number(sy);
+        if (Number.isFinite(y) && y >= 0) {
+          window.requestAnimationFrame(function () {
+            window.scrollTo(0, y);
+          });
+        }
+        currentUrl.searchParams.delete("sy");
+        const clean = currentUrl.pathname + currentUrl.search + currentUrl.hash;
+        window.history.replaceState(null, "", clean);
+      }
+
+      const detailLinks = document.querySelectorAll("a.card-main[href^=\"/items/\"]");
+      detailLinks.forEach(function (link) {
+        link.addEventListener("click", function () {
+          const href = new URL(link.getAttribute("href"), window.location.origin);
+          href.searchParams.set("sy", String(Math.max(0, Math.floor(window.scrollY || 0))));
+          link.setAttribute("href", href.pathname + href.search + href.hash);
+        });
+      });
+    })();
+  </script>
 </body>
 </html>
