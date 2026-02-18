@@ -11,4 +11,5 @@ ratatui.workspace = true
 crossterm.workspace = true
 ratatui-image.workspace = true
 image.workspace = true
+rand.workspace = true
 booru-core = { path = "../booru-core" }

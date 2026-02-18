@@ -15,8 +15,9 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use image::DynamicImage;
+use rand::Rng;
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 use ratatui_image::{Resize, StatefulImage};
@@ -33,6 +34,10 @@ struct Cli {
     /// Suppress scan warnings
     #[arg(long)]
     quiet: bool,
+
+    /// Show sensitive images (default: hidden)
+    #[arg(long)]
+    sensitive: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -95,6 +100,9 @@ impl Preview {
 
 struct App {
     library: Library,
+    show_sensitive: bool,
+    show_help: bool,
+    random_jump_history: Vec<usize>,
     filtered_indices: Vec<usize>,
     selected: usize,
     mode: InputMode,
@@ -111,9 +119,12 @@ struct App {
 }
 
 impl App {
-    fn new(library: Library) -> Self {
+    fn new(library: Library, show_sensitive: bool) -> Self {
         let mut app = Self {
             library,
+            show_sensitive,
+            show_help: false,
+            random_jump_history: Vec::new(),
             filtered_indices: Vec::new(),
             selected: 0,
             mode: InputMode::Normal,
@@ -125,13 +136,27 @@ impl App {
             detail_split_percent: 50,
             dragging_split: false,
             layout: LayoutInfo::default(),
-            status: String::from(
-                "Enter open image, Tab switch focus, / search, j/k move or scroll, t edit tags, s toggle sensitive, q quit",
-            ),
+            status: String::from("Press ? for help. / search, t edit tags, q quit."),
             preview: None,
         };
         app.rebuild_filter();
         app
+    }
+
+    fn toggle_help(&mut self) {
+        self.show_help = !self.show_help;
+        self.status = if self.show_help {
+            "Help opened. Press ? or Esc to close.".to_string()
+        } else {
+            "Help closed.".to_string()
+        };
+    }
+
+    fn close_help(&mut self) {
+        if self.show_help {
+            self.show_help = false;
+            self.status = "Help closed.".to_string();
+        }
     }
 
     fn set_preview_picker(&mut self, picker: Picker) {
@@ -147,7 +172,11 @@ impl App {
         let search = self
             .library
             .search(SearchQuery::new(split_search_terms(&self.search_input)).with_aliases(true));
-        self.filtered_indices = search.indices;
+        self.filtered_indices = search
+            .indices
+            .into_iter()
+            .filter(|idx| self.show_sensitive || !self.library.index.items[*idx].merged_sensitive())
+            .collect();
 
         if self.filtered_indices.is_empty() {
             self.selected = 0;
@@ -235,6 +264,7 @@ impl App {
         .with_context(|| format!("failed to update {}", image_path.display()))?;
 
         self.library.index.items[idx].edits = edits;
+        self.rebuild_filter();
         self.status = format!(
             "Sensitive set to {} for {}",
             if new_value { "ON" } else { "OFF" },
@@ -255,6 +285,57 @@ impl App {
             .with_context(|| format!("failed to run xdg-open for {}", image_path.display()))?;
         self.status = format!("Opened {}", image_path.display());
         Ok(())
+    }
+
+    fn jump_to_random(&mut self) {
+        let len = self.filtered_indices.len();
+        if len == 0 {
+            self.status = "No items to jump.".to_string();
+            return;
+        }
+
+        let previous_item = self.selected_item_index();
+        let mut rng = rand::thread_rng();
+        let next = rng.gen_range(0..len);
+        if let Some(previous_item) = previous_item {
+            let next_item = self.filtered_indices[next];
+            if previous_item != next_item {
+                self.random_jump_history.push(previous_item);
+            }
+        }
+        self.selected = next;
+        self.detail_scroll = 0;
+        self.status = format!(
+            "Jumped to random item ({}/{})",
+            self.selected + 1,
+            self.filtered_indices.len()
+        );
+    }
+
+    fn jump_to_previous_random(&mut self) {
+        if self.filtered_indices.is_empty() {
+            self.status = "No items to jump.".to_string();
+            return;
+        }
+
+        while let Some(previous_item) = self.random_jump_history.pop() {
+            if let Some(previous_selected) = self
+                .filtered_indices
+                .iter()
+                .position(|idx| *idx == previous_item)
+            {
+                self.selected = previous_selected;
+                self.detail_scroll = 0;
+                self.status = format!(
+                    "Returned to previous random item ({}/{})",
+                    self.selected + 1,
+                    self.filtered_indices.len()
+                );
+                return;
+            }
+        }
+
+        self.status = "No previous random jump item.".to_string();
     }
 
     fn apply_tag_edits_from_input(&mut self) -> Result<()> {
@@ -403,7 +484,7 @@ fn main() -> Result<()> {
         }
     }
 
-    run_tui(App::new(library))
+    run_tui(App::new(library, cli.sensitive))
 }
 
 fn run_tui(mut app: App) -> Result<()> {
@@ -458,6 +539,19 @@ fn run_event_loop(
 }
 
 fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<bool> {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        return Ok(true);
+    }
+
+    if app.show_help {
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?') => app.close_help(),
+            KeyCode::Char('/') if key.modifiers.contains(KeyModifiers::SHIFT) => app.close_help(),
+            _ => {}
+        }
+        return Ok(false);
+    }
+
     match app.mode {
         InputMode::Normal => handle_normal_mode(app, key),
         InputMode::Search => Ok(handle_text_mode(app, key, InputMode::Search)?),
@@ -466,12 +560,12 @@ fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<bool> {
 }
 
 fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-        return Ok(true);
-    }
-
     match key.code {
         KeyCode::Char('q') => return Ok(true),
+        KeyCode::Char('?') => app.toggle_help(),
+        KeyCode::Char('/') if key.modifiers.contains(KeyModifiers::SHIFT) => app.toggle_help(),
+        KeyCode::Char(' ') => app.jump_to_random(),
+        KeyCode::Char('b') => app.jump_to_previous_random(),
         KeyCode::Enter => {
             if let Err(err) = app.open_selected_image() {
                 app.status = err.to_string();
@@ -519,6 +613,10 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
 }
 
 fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
+    if app.show_help {
+        return;
+    }
+
     let (x, y) = (mouse.column, mouse.row);
     let on_divider = app
         .layout
@@ -642,6 +740,9 @@ fn render_ui(frame: &mut Frame, app: &mut App) {
     render_search_panel(frame, areas[0], app);
     render_main_panel(frame, areas[1], app);
     render_status(frame, areas[2], app);
+    if app.show_help {
+        render_help_dialog(frame);
+    }
 }
 
 fn render_search_panel(frame: &mut Frame, area: Rect, app: &App) {
@@ -896,6 +997,56 @@ fn inner_rect(rect: Rect) -> Rect {
         return Rect::new(rect.x, rect.y, 0, 0);
     }
     Rect::new(rect.x + 1, rect.y + 1, rect.width - 2, rect.height - 2)
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical[1])[1]
+}
+
+fn render_help_dialog(frame: &mut Frame) {
+    let area = centered_rect(78, 70, frame.area());
+    frame.render_widget(Clear, area);
+    let help_text = [
+        "Navigation:",
+        "  j/k, Up/Down          Move selection or detail scroll",
+        "  Tab, h/l, Left/Right  Switch focus pane",
+        "  PageUp/PageDown       Fast scroll/move",
+        "",
+        "Actions:",
+        "  Enter                 Open selected image",
+        "  Space                 Jump to random image",
+        "  b                     Jump back from random history",
+        "  /                     Search",
+        "  t                     Edit tags (+tag / -tag)",
+        "  s                     Toggle sensitive for selected image",
+        "",
+        "Sensitive filter:",
+        "  Hidden by default, use --sensitive to include.",
+        "",
+        "General:",
+        "  ? or Esc              Close this help",
+        "  q                     Quit",
+    ]
+    .join("\n");
+    let dialog = Paragraph::new(help_text)
+        .block(Block::default().borders(Borders::ALL).title("Help"))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(dialog, area);
 }
 
 fn render_status(frame: &mut Frame, area: Rect, app: &App) {
