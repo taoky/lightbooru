@@ -136,6 +136,10 @@ impl ImageItem {
             return sensitive;
         }
 
+        if pixiv_has_nonempty_restriction_attributes(&self.original) {
+            return true;
+        }
+
         if let Some(flag) = extract_bool_field(
             &self.original,
             &["sensitive", "nsfw", "is_sensitive", "is_nsfw"],
@@ -180,6 +184,37 @@ fn sensitive_value_to_bool(value: &str) -> Option<bool> {
         }
         "safe" | "sfw" | "general" => Some(false),
         _ => None,
+    }
+}
+
+fn pixiv_has_nonempty_restriction_attributes(value: &Value) -> bool {
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+
+    let is_pixiv = obj
+        .get("category")
+        .and_then(Value::as_str)
+        .map(|category| category.eq_ignore_ascii_case("pixiv"))
+        .unwrap_or(false);
+    if !is_pixiv {
+        return false;
+    }
+
+    let Some(attrs) = obj.get("restriction_attributes") else {
+        return false;
+    };
+
+    !json_value_is_empty(attrs)
+}
+
+fn json_value_is_empty(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::String(s) => s.trim().is_empty(),
+        Value::Array(arr) => arr.is_empty(),
+        Value::Object(map) => map.is_empty(),
+        _ => false,
     }
 }
 
@@ -706,6 +741,33 @@ mod tests {
     #[test]
     fn merged_sensitive_ignores_unrelated_field() {
         let item = make_item(json!({ "score": "explicit" }));
+        assert!(!item.merged_sensitive());
+    }
+
+    #[test]
+    fn merged_sensitive_marks_pixiv_with_nonempty_restriction_attributes() {
+        let item = make_item(json!({
+            "category": "pixiv",
+            "restriction_attributes": [{"name": "R-18"}]
+        }));
+        assert!(item.merged_sensitive());
+    }
+
+    #[test]
+    fn merged_sensitive_ignores_empty_pixiv_restriction_attributes() {
+        let item = make_item(json!({
+            "category": "pixiv",
+            "restriction_attributes": []
+        }));
+        assert!(!item.merged_sensitive());
+    }
+
+    #[test]
+    fn merged_sensitive_ignores_non_pixiv_restriction_attributes() {
+        let item = make_item(json!({
+            "category": "twitter",
+            "restriction_attributes": [{"name": "R-18"}]
+        }));
         assert!(!item.merged_sensitive());
     }
 
