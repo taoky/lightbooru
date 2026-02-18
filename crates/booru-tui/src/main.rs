@@ -126,7 +126,7 @@ impl App {
             dragging_split: false,
             layout: LayoutInfo::default(),
             status: String::from(
-                "Enter open image, Tab switch focus, / search, j/k move or scroll, t add tags, s toggle sensitive, q quit",
+                "Enter open image, Tab switch focus, / search, j/k move or scroll, t edit tags, s toggle sensitive, q quit",
             ),
             preview: None,
         };
@@ -257,10 +257,10 @@ impl App {
         Ok(())
     }
 
-    fn add_tags_from_input(&mut self) -> Result<()> {
-        let tags = parse_tags(&self.input_buffer);
-        if tags.is_empty() {
-            self.status = "No tags entered.".to_string();
+    fn apply_tag_edits_from_input(&mut self) -> Result<()> {
+        let changes = parse_tag_changes(&self.input_buffer);
+        if changes.is_empty() {
+            self.status = "No tag edits entered.".to_string();
             return Ok(());
         }
 
@@ -274,8 +274,8 @@ impl App {
             &image_path,
             EditUpdate {
                 set_tags: None,
-                add_tags: tags.clone(),
-                remove_tags: Vec::new(),
+                add_tags: changes.add.clone(),
+                remove_tags: changes.remove.clone(),
                 clear_tags: false,
                 notes: None,
                 sensitive: None,
@@ -285,19 +285,94 @@ impl App {
 
         self.library.index.items[idx].edits = edits;
         self.rebuild_filter();
-        self.status = format!("Added tags [{}]", tags.join(", "));
+        self.status = format_tag_edit_summary(&changes);
         Ok(())
     }
 }
 
-fn parse_tags(input: &str) -> Vec<String> {
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+struct TagChanges {
+    add: Vec<String>,
+    remove: Vec<String>,
+}
+
+impl TagChanges {
+    fn is_empty(&self) -> bool {
+        self.add.is_empty() && self.remove.is_empty()
+    }
+}
+
+fn parse_tag_changes(input: &str) -> TagChanges {
+    let mut add = Vec::new();
+    let mut remove = Vec::new();
     let normalized = input.replace(',', " ");
-    normalized
-        .split_whitespace()
-        .map(str::trim)
-        .filter(|tag| !tag.is_empty())
-        .map(ToString::to_string)
-        .collect()
+    for part in normalized.split_whitespace().map(str::trim) {
+        if part.is_empty() {
+            continue;
+        }
+
+        let (is_remove, tag) = if let Some(rest) = part.strip_prefix('-') {
+            (true, rest.trim())
+        } else if let Some(rest) = part.strip_prefix('+') {
+            (false, rest.trim())
+        } else {
+            (false, part)
+        };
+
+        if tag.is_empty() {
+            continue;
+        }
+
+        if is_remove {
+            append_unique_with_last_wins(&mut remove, &mut add, tag);
+        } else {
+            append_unique_with_last_wins(&mut add, &mut remove, tag);
+        }
+    }
+
+    TagChanges { add, remove }
+}
+
+fn append_unique_with_last_wins(primary: &mut Vec<String>, opposite: &mut Vec<String>, tag: &str) {
+    opposite.retain(|existing| existing != tag);
+    if let Some(pos) = primary.iter().position(|existing| existing == tag) {
+        primary.remove(pos);
+    }
+    primary.push(tag.to_string());
+}
+
+fn apply_tag_changes(current: &[String], changes: &TagChanges) -> Vec<String> {
+    let mut result = current.to_vec();
+    for tag in &changes.remove {
+        result.retain(|existing| existing != tag);
+    }
+    for tag in &changes.add {
+        if !result.iter().any(|existing| existing == tag) {
+            result.push(tag.clone());
+        }
+    }
+    result
+}
+
+fn format_tag_list(tags: &[String]) -> String {
+    if tags.is_empty() {
+        "(none)".to_string()
+    } else {
+        tags.join(" ")
+    }
+}
+
+fn format_tag_edit_summary(changes: &TagChanges) -> String {
+    match (changes.add.is_empty(), changes.remove.is_empty()) {
+        (false, false) => format!(
+            "Tag edits applied: +[{}] -[{}]",
+            changes.add.join(", "),
+            changes.remove.join(", ")
+        ),
+        (false, true) => format!("Added tags [{}]", changes.add.join(", ")),
+        (true, false) => format!("Removed tags [{}]", changes.remove.join(", ")),
+        (true, true) => "No tag edits entered.".to_string(),
+    }
 }
 
 fn split_search_terms(input: &str) -> Vec<String> {
@@ -429,7 +504,8 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
         KeyCode::Char('t') => {
             app.mode = InputMode::Tag;
             app.input_buffer.clear();
-            app.status = "Tag mode: input tags (space/comma separated) and press Enter".to_string();
+            app.status =
+                "Tag mode: +tag add, -tag remove (space/comma separated), Enter apply".to_string();
         }
         KeyCode::Char('s') => {
             if let Err(err) = app.toggle_sensitive() {
@@ -532,7 +608,7 @@ fn handle_text_mode(app: &mut App, key: KeyEvent, mode: InputMode) -> Result<boo
                 app.rebuild_filter();
                 app.status = format!("Filter updated: {} result(s)", app.filtered_indices.len());
             } else {
-                if let Err(err) = app.add_tags_from_input() {
+                if let Err(err) = app.apply_tag_edits_from_input() {
                     app.status = err.to_string();
                 }
             }
@@ -571,7 +647,8 @@ fn render_ui(frame: &mut Frame, app: &mut App) {
 fn render_search_panel(frame: &mut Frame, area: Rect, app: &App) {
     let label = match app.mode {
         InputMode::Search => format!("Search: {}_", app.input_buffer),
-        _ => format!("Search: {}", app.search_input),
+        InputMode::Tag => format!("Tag edit (+tag/-tag): {}_", app.input_buffer),
+        InputMode::Normal => format!("Search: {}", app.search_input),
     };
     let paragraph =
         Paragraph::new(label).block(Block::default().borders(Borders::ALL).title("Filter"));
@@ -684,24 +761,34 @@ fn render_detail_and_preview(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let (detail_text, image_path, preview_fallback) = {
         let item = &app.library.index.items[item_idx];
-        let detail_text = format!(
+        let merged_tags = item.merged_tags();
+        let mut detail_text = format!(
             "Path: {}\nAuthor: {}\nDate: {}\nSensitive: {}\nTags: {}\nNotes: {}\nURL: {}\n\nDetail:\n{}",
             item.image_path.display(),
             item.merged_author().unwrap_or_else(|| "(none)".to_string()),
             item.merged_date().unwrap_or_else(|| "(none)".to_string()),
             if item.merged_sensitive() { "yes" } else { "no" },
-            {
-                let tags = item.merged_tags();
-                if tags.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    tags.join(" ")
-                }
-            },
+            format_tag_list(&merged_tags),
             item.edits.notes.as_deref().unwrap_or("(none)"),
             item.platform_url().unwrap_or_else(|| "(none)".to_string()),
             item.merged_detail().unwrap_or_else(|| "(none)".to_string())
         );
+        if app.mode == InputMode::Tag {
+            let changes = parse_tag_changes(&app.input_buffer);
+            let result_tags = apply_tag_changes(&merged_tags, &changes);
+            detail_text.push_str("\n\nTag Edit Preview:\n");
+            detail_text.push_str(&format!(
+                "Input: {}\nAdd: {}\nRemove: {}\nResult: {}",
+                if app.input_buffer.is_empty() {
+                    "(empty)"
+                } else {
+                    &app.input_buffer
+                },
+                format_tag_list(&changes.add),
+                format_tag_list(&changes.remove),
+                format_tag_list(&result_tags)
+            ));
+        }
         let preview_fallback = format!(
             "Image: {}\nMetadata: {}\nBooru edits: {}",
             item.image_path.display(),
@@ -824,4 +911,46 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     let status = Paragraph::new(format!("[{prefix} | Focus:{focus}] {}", app.status))
         .block(Block::default().borders(Borders::ALL).title("Status"));
     frame.render_widget(status, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_tag_changes, parse_tag_changes, TagChanges};
+
+    #[test]
+    fn parse_tag_changes_supports_add_and_remove() {
+        let changes = parse_tag_changes("cat +dog -bird");
+        assert_eq!(
+            changes,
+            TagChanges {
+                add: vec!["cat".to_string(), "dog".to_string()],
+                remove: vec!["bird".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn parse_tag_changes_uses_last_operation() {
+        let changes = parse_tag_changes("+cat -cat +cat -dog +dog");
+        assert_eq!(
+            changes,
+            TagChanges {
+                add: vec!["cat".to_string(), "dog".to_string()],
+                remove: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn apply_tag_changes_adds_and_removes_tags() {
+        let current = vec!["cat".to_string(), "bird".to_string()];
+        let changes = TagChanges {
+            add: vec!["dog".to_string()],
+            remove: vec!["bird".to_string()],
+        };
+        assert_eq!(
+            apply_tag_changes(&current, &changes),
+            vec!["cat".to_string(), "dog".to_string()]
+        );
+    }
 }
