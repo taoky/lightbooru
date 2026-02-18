@@ -149,6 +149,25 @@
     .meta-block { margin-bottom: 12px; }
     .meta-block a { color: #005f73; text-decoration: none; overflow-wrap: anywhere; }
 
+    .selection-search-tip {
+      position: fixed;
+      z-index: 9999;
+      border: 1px solid transparent;
+      border-radius: 10px;
+      height: 36px;
+      padding: 0 12px;
+      background: var(--accent);
+      color: #f7fffd;
+      font-size: .85rem;
+      font-weight: 700;
+      letter-spacing: .01em;
+      cursor: pointer;
+      box-shadow: 0 8px 18px var(--shadow);
+      transform: translateX(-50%);
+    }
+
+    .selection-search-tip:hover { background: #0b7f82; }
+
     .readonly {
       border-top: 1px dashed var(--line);
       padding-top: 12px;
@@ -261,5 +280,85 @@
       <pre>{{ original_json }}</pre>
     </section>
   </main>
+  <script>
+    (function () {
+      const searchTip = document.createElement("button");
+      searchTip.type = "button";
+      searchTip.className = "selection-search-tip";
+      searchTip.hidden = true;
+      let selectedText = "";
+
+      function hideSearchTip() {
+        searchTip.hidden = true;
+        selectedText = "";
+      }
+
+      function buildQuickSearchHref(text) {
+        const current = new URL(window.location.href);
+        const target = new URL("/", window.location.origin);
+        ["show_sensitive", "randomize", "seed", "limit"].forEach(function (key) {
+          const value = current.searchParams.get(key);
+          if (value !== null && value !== "") {
+            target.searchParams.set(key, value);
+          }
+        });
+        target.searchParams.set("q", text);
+        target.searchParams.set("page", "1");
+        return target.pathname + target.search;
+      }
+
+      function updateSearchTipFromSelection() {
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+          hideSearchTip();
+          return;
+        }
+
+        const text = selection.toString().replace(/\s+/g, " ").trim();
+        if (!text || text.length > 120) {
+          hideSearchTip();
+          return;
+        }
+
+        const rect = selection.getRangeAt(0).getBoundingClientRect();
+        if (!rect || (rect.width === 0 && rect.height === 0)) {
+          hideSearchTip();
+          return;
+        }
+
+        selectedText = text;
+        const label = text.length > 24 ? text.slice(0, 24) + "..." : text;
+        searchTip.textContent = "搜索 \"" + label + "\"";
+        const centerX = Math.min(window.innerWidth - 12, Math.max(12, rect.left + rect.width / 2));
+        const top = rect.top > 48 ? rect.top - 44 : rect.bottom + 10;
+        searchTip.style.left = centerX + "px";
+        searchTip.style.top = top + "px";
+        searchTip.hidden = false;
+      }
+
+      searchTip.addEventListener("mousedown", function (event) {
+        event.preventDefault();
+      });
+      searchTip.addEventListener("click", function () {
+        if (!selectedText) return;
+        window.location.href = buildQuickSearchHref(selectedText);
+      });
+      document.body.appendChild(searchTip);
+
+      document.addEventListener("mouseup", function () {
+        window.setTimeout(updateSearchTipFromSelection, 0);
+      });
+      document.addEventListener("touchend", function () {
+        window.setTimeout(updateSearchTipFromSelection, 0);
+      });
+      document.addEventListener("mousedown", function (event) {
+        if (!searchTip.contains(event.target)) {
+          hideSearchTip();
+        }
+      });
+      window.addEventListener("scroll", hideSearchTip, true);
+      window.addEventListener("resize", hideSearchTip);
+    })();
+  </script>
 </body>
 </html>
