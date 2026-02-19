@@ -2,7 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex, Once};
 use std::thread;
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -10,9 +10,9 @@ use tracing_subscriber::EnvFilter;
 
 use adw::prelude::*;
 use adw::{
-    ActionRow, Application, ApplicationWindow, Banner, Clamp, EntryRow, HeaderBar, NavigationPage,
+    ActionRow, Application, ApplicationWindow, Banner, Clamp, HeaderBar, NavigationPage,
     NavigationSplitView, StatusPage, SwitchRow, Toast, ToastOverlay, Toggle, ToggleGroup,
-    ToolbarView, ViewStack, WindowTitle,
+    ToolbarView, ViewStack, WindowTitle, WrapBox,
 };
 use anyhow::Result;
 use booru_core::{
@@ -20,9 +20,13 @@ use booru_core::{
 };
 use clap::Parser;
 use gtk::{
-    self, Align, Box as GtkBox, Button, GridView, Label, ListBox, Orientation, Picture,
-    ScrolledWindow, SearchEntry, SelectionMode, SignalListItemFactory, SingleSelection,
+    self, Align, Box as GtkBox, Button, Entry, GridView, Label, ListBox, Orientation, Picture,
+    ScrolledWindow, SearchEntry, SelectionMode, SignalListItemFactory, SingleSelection, TextView,
 };
+
+const APP_CSS: &str = include_str!("style.css");
+
+static APP_CSS_ONCE: Once = Once::new();
 
 #[derive(Parser, Debug)]
 #[command(name = "booru-gtk", version, about = "GTK GUI for LightBooru")]
@@ -136,7 +140,11 @@ struct Ui {
     author: Label,
     date: Label,
     detail: Label,
-    tags: EntryRow,
+    tags_wrap: WrapBox,
+    tags_add_button: Button,
+    tags_input: Entry,
+    tag_values: Rc<RefCell<Vec<String>>>,
+    notes: TextView,
     item_sensitive: SwitchRow,
     status: Label,
     detail_stack: ViewStack,
@@ -358,6 +366,8 @@ fn scan_library(config: &BooruConfig, quiet: bool) -> Result<Library> {
 }
 
 fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
+    install_tag_editor_css();
+
     let image_loader = Rc::new(ImageLoader::new());
 
     let window = ApplicationWindow::builder()
@@ -654,14 +664,57 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
     detail.set_wrap(true);
     detail.set_selectable(true);
 
-    let tags = EntryRow::builder().title("Tags").build();
+    let tags_wrap = WrapBox::new();
+    tags_wrap.set_line_spacing(6);
+    tags_wrap.set_child_spacing(6);
+
+    let tags_add_button = Button::from_icon_name("list-add-symbolic");
+    tags_add_button.add_css_class("flat");
+    tags_add_button.add_css_class("circular");
+    tags_add_button.set_tooltip_text(Some("Add tags from input"));
+
+    let tags_input = Entry::new();
+    tags_input.set_placeholder_text(Some("Type tags, press Enter or +"));
+    tags_input.set_hexpand(true);
+
+    let tags_editor = GtkBox::new(Orientation::Vertical, 6);
+    let tags_title = Label::new(Some("Tags"));
+    tags_title.set_xalign(0.0);
+    tags_editor.append(&tags_title);
+    tags_editor.append(&tags_wrap);
+    tags_editor.append(&tags_input);
+
+    let notes = TextView::new();
+    notes.set_wrap_mode(gtk::WrapMode::WordChar);
+    notes.set_vexpand(false);
+    notes.set_hexpand(true);
+    notes.set_top_margin(8);
+    notes.set_bottom_margin(8);
+    notes.set_left_margin(12);
+    notes.set_right_margin(12);
+    notes.set_accepts_tab(false);
+
+    let notes_scroll = ScrolledWindow::new();
+    notes_scroll.set_min_content_height(132);
+    notes_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    notes_scroll.set_has_frame(false);
+    notes_scroll.add_css_class("notes-editor");
+    notes_scroll.set_child(Some(&notes));
+    notes_scroll.set_hexpand(true);
+
+    let notes_editor = GtkBox::new(Orientation::Vertical, 6);
+    let notes_title = Label::new(Some("Notes"));
+    notes_title.set_xalign(0.0);
+    notes_editor.append(&notes_title);
+    notes_editor.append(&notes_scroll);
 
     let item_sensitive = SwitchRow::builder().title("Sensitive").build();
     let edit_group = adw::PreferencesGroup::builder()
         .title("Edits")
         .description("Saved to *.booru.json")
         .build();
-    edit_group.add(&tags);
+    edit_group.add(&tags_editor);
+    edit_group.add(&notes_editor);
     edit_group.add(&item_sensitive);
 
     let save_button = Button::with_label("Save");
@@ -722,7 +775,11 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
         author,
         date,
         detail,
-        tags,
+        tags_wrap,
+        tags_add_button,
+        tags_input,
+        tag_values: Rc::new(RefCell::new(Vec::new())),
+        notes,
         item_sensitive,
         status,
         detail_stack,
@@ -734,6 +791,7 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
         image_loader,
     };
 
+    rebuild_tag_wrap(&ui);
     window.present();
     rebuild_view(&state, &ui);
 
@@ -756,6 +814,23 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
             if search_button.is_active() != enabled {
                 search_button.set_active(enabled);
             }
+        });
+    }
+
+    {
+        let ui = ui.clone();
+        let tags_input = ui.tags_input.clone();
+        tags_input.connect_activate(move |_| {
+            append_pending_tags_input(&ui);
+        });
+    }
+
+    {
+        let ui = ui.clone();
+        let tags_add_button = ui.tags_add_button.clone();
+        tags_add_button.connect_clicked(move |_| {
+            append_pending_tags_input(&ui);
+            ui.tags_input.grab_focus();
         });
     }
 
@@ -880,6 +955,22 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
     }
 }
 
+fn install_tag_editor_css() {
+    APP_CSS_ONCE.call_once(|| {
+        let Some(display) = gtk::gdk::Display::default() else {
+            return;
+        };
+
+        let provider = gtk::CssProvider::new();
+        provider.load_from_string(APP_CSS);
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    });
+}
+
 fn rebuild_view(state: &Rc<RefCell<AppState>>, ui: &Ui) {
     let browser_mode = state.borrow().browser_mode;
     ui.browser_stack
@@ -968,7 +1059,8 @@ fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
             item.merged_author().unwrap_or_else(|| "-".to_string()),
             item.merged_date().unwrap_or_else(|| "-".to_string()),
             item.merged_detail().unwrap_or_default(),
-            item.merged_tags().join(" "),
+            item.merged_tags(),
+            item.edits.notes.clone().unwrap_or_default(),
             item.merged_sensitive(),
             state.library.index.items.len(),
         )
@@ -979,8 +1071,14 @@ fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
     ui.author.set_text(&format!("Author: {}", snapshot.3));
     ui.date.set_text(&format!("Date: {}", snapshot.4));
     ui.detail.set_text(&snapshot.5);
-    ui.tags.set_text(&snapshot.6);
-    ui.item_sensitive.set_active(snapshot.7);
+    {
+        let mut tag_values = ui.tag_values.borrow_mut();
+        *tag_values = snapshot.6.clone();
+    }
+    ui.tags_input.set_text("");
+    rebuild_tag_wrap(ui);
+    set_notes_text(&ui.notes, &snapshot.7);
+    ui.item_sensitive.set_active(snapshot.8);
     ui.picture.set_paintable(None::<&gtk::gdk::Texture>);
     hide_banner(ui);
     set_status(ui, &format!("Loading image: {}", snapshot.1.display()));
@@ -994,7 +1092,7 @@ fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
 
     let ui_handle = ui.clone();
     let image_path = snapshot.1.clone();
-    let total_items = snapshot.8;
+    let total_items = snapshot.9;
     let pending_request_slot = ui.detail_pending_request_id.clone();
     let request_id = ui.image_loader.load(
         image_path.clone(),
@@ -1049,7 +1147,10 @@ fn clear_detail(ui: &Ui) {
     ui.author.set_text("");
     ui.date.set_text("");
     ui.detail.set_text("");
-    ui.tags.set_text("");
+    ui.tag_values.borrow_mut().clear();
+    ui.tags_input.set_text("");
+    rebuild_tag_wrap(ui);
+    set_notes_text(&ui.notes, "");
     ui.item_sensitive.set_active(false);
     ui.picture.set_paintable(None::<&gtk::gdk::Texture>);
     set_status(ui, "No item selected.");
@@ -1068,7 +1169,9 @@ fn save_selected_edits(state: &Rc<RefCell<AppState>>, ui: &Ui) -> Result<()> {
         )
     };
 
-    let tags = parse_tags_input(&ui.tags.text());
+    append_pending_tags_input(ui);
+    let tags = ui.tag_values.borrow().clone();
+    let notes = get_notes_text(&ui.notes);
     let sensitive = ui.item_sensitive.is_active();
     let edits = apply_update_to_image(
         &image_path,
@@ -1077,7 +1180,7 @@ fn save_selected_edits(state: &Rc<RefCell<AppState>>, ui: &Ui) -> Result<()> {
             add_tags: Vec::new(),
             remove_tags: Vec::new(),
             clear_tags: false,
-            notes: None,
+            notes: Some(notes),
             sensitive: Some(sensitive),
         },
     )?;
@@ -1131,6 +1234,76 @@ fn parse_tags_input(input: &str) -> Vec<String> {
         .filter(|tag| !tag.is_empty())
         .map(ToString::to_string)
         .collect()
+}
+
+fn set_notes_text(notes: &TextView, text: &str) {
+    notes.buffer().set_text(text);
+}
+
+fn get_notes_text(notes: &TextView) -> String {
+    let buffer = notes.buffer();
+    buffer
+        .text(&buffer.start_iter(), &buffer.end_iter(), false)
+        .to_string()
+}
+
+fn append_pending_tags_input(ui: &Ui) -> bool {
+    let pending_tags = parse_tags_input(&ui.tags_input.text());
+    if pending_tags.is_empty() {
+        return false;
+    }
+
+    {
+        let mut current_tags = ui.tag_values.borrow_mut();
+        current_tags.extend(pending_tags);
+    }
+    ui.tags_input.set_text("");
+    rebuild_tag_wrap(ui);
+    true
+}
+
+fn rebuild_tag_wrap(ui: &Ui) {
+    ui.tags_wrap.remove_all();
+
+    let tags = ui.tag_values.borrow().clone();
+    for (index, tag) in tags.iter().enumerate() {
+        let chip = build_tag_chip(ui, index, tag);
+        ui.tags_wrap.append(&chip);
+    }
+
+    ui.tags_wrap.append(&ui.tags_add_button);
+}
+
+fn build_tag_chip(ui: &Ui, index: usize, tag: &str) -> GtkBox {
+    let chip = GtkBox::new(Orientation::Horizontal, 0);
+    chip.set_hexpand(false);
+    chip.add_css_class("tag");
+
+    let label = Label::new(Some(tag));
+    label.set_xalign(0.0);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    label.set_hexpand(true);
+
+    let remove_button = Button::from_icon_name("window-close-symbolic");
+    remove_button.add_css_class("flat");
+    remove_button.add_css_class("circular");
+    remove_button.set_tooltip_text(Some("Remove tag"));
+
+    chip.append(&label);
+    chip.append(&remove_button);
+
+    let ui_handle = ui.clone();
+    remove_button.connect_clicked(move |_| {
+        {
+            let mut tags = ui_handle.tag_values.borrow_mut();
+            if index < tags.len() {
+                tags.remove(index);
+            }
+        }
+        rebuild_tag_wrap(&ui_handle);
+    });
+
+    chip
 }
 
 fn infer_title(item: &booru_core::ImageItem) -> String {
