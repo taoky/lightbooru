@@ -619,7 +619,7 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
     }
 
     let grid = GridView::new(Some(grid_selection.clone()), Some(grid_factory));
-    grid.set_single_click_activate(true);
+    grid.set_single_click_activate(false);
     grid.set_max_columns(4);
     grid.set_min_columns(2);
     let grid_scroll = ScrolledWindow::new();
@@ -990,19 +990,22 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
     {
         let state_handle = state.clone();
         let ui = ui.clone();
-        let grid_handle = grid.clone();
-        grid_handle.connect_activate(move |_grid, position| {
-            let selected_pos = usize::try_from(position).ok();
-            {
+        let grid_selection_handle = ui.grid_selection.clone();
+        grid_selection_handle.connect_selected_notify(move |selection| {
+            let selected_pos = match selection.selected() {
+                gtk::INVALID_LIST_POSITION => None,
+                pos => usize::try_from(pos).ok(),
+            };
+            let selected_pos = {
                 let mut state = state_handle.borrow_mut();
-                state.selected_pos = selected_pos.filter(|pos| *pos < state.filtered_indices.len());
-            }
+                let selected_pos = selected_pos.filter(|pos| *pos < state.filtered_indices.len());
+                if state.selected_pos == selected_pos {
+                    return;
+                }
+                state.selected_pos = selected_pos;
+                selected_pos
+            };
 
-            if let Some(pos) = selected_pos {
-                ui.grid_selection.set_selected(pos as u32);
-            } else {
-                ui.grid_selection.set_selected(gtk::INVALID_LIST_POSITION);
-            }
             sync_browser_selection(&ui, selected_pos);
             refresh_detail(&state_handle, &ui);
         });
