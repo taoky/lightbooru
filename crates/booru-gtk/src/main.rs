@@ -66,6 +66,7 @@ impl BrowserMode {
 struct GridItemData {
     item_idx: usize,
     texture: Rc<RefCell<Option<gtk::gdk::Texture>>>,
+    pending_request_id: Rc<Cell<Option<u64>>>,
 }
 
 struct AppState {
@@ -146,7 +147,7 @@ struct Ui {
     image_loader: Rc<ImageLoader>,
 }
 
-type ImageLoadCallback = Box<dyn FnOnce(Result<gtk::gdk::Texture, String>)>;
+type ImageLoadCallback = Box<dyn FnOnce(u64, Result<gtk::gdk::Texture, String>)>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ImageRequestKind {
@@ -217,9 +218,9 @@ impl ImageLoader {
                                 &image.pixels,
                                 image.rowstride,
                             );
-                            callback(Ok(texture.upcast::<gtk::gdk::Texture>()));
+                            callback(id, Ok(texture.upcast::<gtk::gdk::Texture>()));
                         }
-                        ImageDecodeResult::Err { message, .. } => callback(Err(message)),
+                        ImageDecodeResult::Err { message, .. } => callback(id, Err(message)),
                     }
                 }
 
@@ -242,18 +243,20 @@ impl ImageLoader {
         }
     }
 
-    fn load<F>(&self, path: PathBuf, scale: Option<(i32, i32)>, kind: ImageRequestKind, callback: F)
+    fn load<F>(
+        &self,
+        path: PathBuf,
+        scale: Option<(i32, i32)>,
+        kind: ImageRequestKind,
+        callback: F,
+    ) -> u64
     where
-        F: FnOnce(Result<gtk::gdk::Texture, String>) + 'static,
+        F: FnOnce(u64, Result<gtk::gdk::Texture, String>) + 'static,
     {
-        const MAX_PENDING_GRID_TASKS: usize = 96;
-        const MAX_PENDING_DETAIL_TASKS: usize = 4;
-
         let id = self.next_id.get();
         self.next_id.set(id.wrapping_add(1));
         self.callbacks.borrow_mut().insert(id, Box::new(callback));
 
-        let mut dropped_ids = Vec::new();
         let task = ImageDecodeTask {
             id,
             path,
@@ -265,33 +268,28 @@ impl ImageLoader {
             let mut queues = lock.lock().expect("image queue mutex poisoned");
 
             match kind {
-                ImageRequestKind::Detail => {
-                    if queues.detail.len() >= MAX_PENDING_DETAIL_TASKS {
-                        if let Some(dropped) = queues.detail.pop_front() {
-                            dropped_ids.push(dropped.id);
-                        }
-                    }
-                    queues.detail.push_back(task);
-                }
-                ImageRequestKind::GridThumb => {
-                    if queues.grid.len() >= MAX_PENDING_GRID_TASKS {
-                        if let Some(dropped) = queues.grid.pop_front() {
-                            dropped_ids.push(dropped.id);
-                        }
-                    }
-                    queues.grid.push_back(task);
-                }
+                ImageRequestKind::Detail => queues.detail.push_back(task),
+                ImageRequestKind::GridThumb => queues.grid.push_back(task),
             }
 
             condvar.notify_one();
         }
 
-        if !dropped_ids.is_empty() {
-            let mut callbacks = self.callbacks.borrow_mut();
-            for dropped_id in dropped_ids {
-                callbacks.remove(&dropped_id);
-            }
+        id
+    }
+
+    fn cancel_if_queued(&self, id: u64) -> bool {
+        let removed = {
+            let (lock, _) = &*self.queue_state;
+            let mut queues = lock.lock().expect("image queue mutex poisoned");
+            remove_queued_task(&mut queues.detail, id) || remove_queued_task(&mut queues.grid, id)
+        };
+
+        if removed {
+            self.callbacks.borrow_mut().remove(&id);
         }
+
+        removed
     }
 }
 
@@ -483,6 +481,7 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
             let data = boxed_item.borrow::<GridItemData>();
             let item_idx = data.item_idx;
             let texture_slot = data.texture.clone();
+            let pending_request_id = data.pending_request_id.clone();
             drop(data);
 
             let Some((card, thumb, caption)) = grid_cell_widgets(list_item) else {
@@ -515,15 +514,25 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
                 return;
             }
 
+            if let Some(previous_request_id) = pending_request_id.replace(None) {
+                image_loader_handle.cancel_if_queued(previous_request_id);
+            }
+
             thumb.set_paintable(None::<&gtk::gdk::Texture>);
             let tooltip_guard = tooltip.clone();
             let thumb_weak = thumb.downgrade();
             let card_weak = card.downgrade();
-            image_loader_handle.load(
+            let pending_request_slot = pending_request_id.clone();
+            debug!("Load {}", image_path.display());
+            let request_id = image_loader_handle.load(
                 image_path,
                 Some((156, 156)),
                 ImageRequestKind::GridThumb,
-                move |result| {
+                move |finished_id, result| {
+                    if pending_request_slot.get() == Some(finished_id) {
+                        pending_request_slot.set(None);
+                    }
+
                     let Some(thumb) = thumb_weak.upgrade() else {
                         return;
                     };
@@ -544,22 +553,38 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
                     }
                 },
             );
+            pending_request_id.set(Some(request_id));
         });
     }
 
-    grid_factory.connect_unbind(|_, list_item_obj| {
-        let Some(list_item) = list_item_obj.downcast_ref::<gtk::ListItem>() else {
-            return;
-        };
+    {
+        let image_loader_handle = image_loader.clone();
+        grid_factory.connect_unbind(move |_, list_item_obj| {
+            let Some(list_item) = list_item_obj.downcast_ref::<gtk::ListItem>() else {
+                return;
+            };
 
-        let Some((card, thumb, caption)) = grid_cell_widgets(list_item) else {
-            return;
-        };
+            let pending_request_id = list_item
+                .item()
+                .and_then(|obj| obj.downcast::<gtk::glib::BoxedAnyObject>().ok())
+                .and_then(|boxed_item| {
+                    let data = boxed_item.borrow::<GridItemData>();
+                    data.pending_request_id.replace(None)
+                });
+            if let Some(request_id) = pending_request_id {
+                debug!("Canceling task {}", request_id);
+                image_loader_handle.cancel_if_queued(request_id);
+            }
 
-        thumb.set_paintable(Option::<&gtk::gdk::Texture>::None);
-        caption.set_text("");
-        card.set_tooltip_text(None::<&str>);
-    });
+            let Some((card, thumb, caption)) = grid_cell_widgets(list_item) else {
+                return;
+            };
+
+            thumb.set_paintable(Option::<&gtk::gdk::Texture>::None);
+            caption.set_text("");
+            card.set_tooltip_text(None::<&str>);
+        });
+    }
 
     let grid = GridView::new(Some(grid_selection.clone()), Some(grid_factory));
     grid.set_single_click_activate(true);
@@ -901,6 +926,7 @@ fn refresh_grid(state: &Rc<RefCell<AppState>>, ui: &Ui) {
         let boxed = gtk::glib::BoxedAnyObject::new(GridItemData {
             item_idx,
             texture: Rc::new(RefCell::new(None)),
+            pending_request_id: Rc::new(Cell::new(None)),
         });
         ui.grid_store.append(&boxed);
     }
@@ -950,7 +976,7 @@ fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
         image_path.clone(),
         None,
         ImageRequestKind::Detail,
-        move |result| {
+        move |_, result| {
             if ui_handle.detail_image_seq.get() != load_seq {
                 return;
             }
@@ -1146,6 +1172,14 @@ fn image_decode_worker(
             break;
         }
     }
+}
+
+fn remove_queued_task(queue: &mut VecDeque<ImageDecodeTask>, id: u64) -> bool {
+    let Some(position) = queue.iter().position(|task| task.id == id) else {
+        return false;
+    };
+    queue.remove(position);
+    true
 }
 
 fn decode_image_for_texture(
