@@ -10,8 +10,9 @@ use tracing_subscriber::EnvFilter;
 
 use adw::prelude::*;
 use adw::{
-    ActionRow, Application, ApplicationWindow, Banner, Clamp, HeaderBar, NavigationPage,
-    NavigationSplitView, StatusPage, SwitchRow, Toast, ToastOverlay, Toggle, ToggleGroup,
+    ActionRow, Application, ApplicationWindow, Banner, BottomSheet, Clamp, HeaderBar,
+    NavigationPage,
+    NavigationSplitView, StatusPage, Toast, ToastOverlay, Toggle, ToggleGroup,
     ToolbarView, ViewStack, WindowTitle, WrapBox,
 };
 use anyhow::Result;
@@ -145,9 +146,10 @@ struct Ui {
     tags_input: Entry,
     tag_values: Rc<RefCell<Vec<String>>>,
     notes: TextView,
-    item_sensitive: SwitchRow,
+    item_sensitive: gtk::Switch,
     status: Label,
     detail_stack: ViewStack,
+    edit_sheet: BottomSheet,
     toast_overlay: ToastOverlay,
     banner: Banner,
     detail_image_seq: Rc<Cell<u64>>,
@@ -374,7 +376,7 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
         .application(app)
         .title("lightbooru")
         .default_width(1280)
-        .default_height(800)
+        .default_height(960)
         .build();
 
     let toast_overlay = ToastOverlay::new();
@@ -634,11 +636,11 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
     let sidebar_page = NavigationPage::new(&browser_stack, "Library");
     split.set_sidebar(Some(&sidebar_page));
 
-    let detail_wrap = GtkBox::new(Orientation::Vertical, 12);
-    detail_wrap.set_margin_start(12);
-    detail_wrap.set_margin_end(12);
-    detail_wrap.set_margin_top(12);
-    detail_wrap.set_margin_bottom(12);
+    let detail_content_wrap = GtkBox::new(Orientation::Vertical, 12);
+    detail_content_wrap.set_margin_start(12);
+    detail_content_wrap.set_margin_end(12);
+    detail_content_wrap.set_margin_top(12);
+    detail_content_wrap.set_margin_bottom(72);
 
     let title = Label::new(None);
     title.set_xalign(0.0);
@@ -708,35 +710,100 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
     notes_editor.append(&notes_title);
     notes_editor.append(&notes_scroll);
 
-    let item_sensitive = SwitchRow::builder().title("Sensitive").build();
-    let edit_group = adw::PreferencesGroup::builder()
-        .title("Edits")
-        .description("Saved to *.booru.json")
-        .build();
-    edit_group.add(&tags_editor);
-    edit_group.add(&notes_editor);
-    edit_group.add(&item_sensitive);
+    let item_sensitive = gtk::Switch::new();
+    item_sensitive.set_halign(Align::End);
+
+    let sensitive_row = GtkBox::new(Orientation::Horizontal, 12);
+    sensitive_row.add_css_class("edit-sensitive-row");
+    let sensitive_title = Label::new(Some("Sensitive"));
+    sensitive_title.set_xalign(0.0);
+    sensitive_title.set_hexpand(true);
+    sensitive_row.append(&sensitive_title);
+    sensitive_row.append(&item_sensitive);
+
+    tags_editor.add_css_class("edit-field");
+    notes_editor.add_css_class("edit-field");
+
+    let edits_panel = GtkBox::new(Orientation::Vertical, 12);
+    edits_panel.add_css_class("edit-panel");
+    edits_panel.append(&tags_editor);
+    edits_panel.append(&gtk::Separator::new(Orientation::Horizontal));
+    edits_panel.append(&notes_editor);
+    edits_panel.append(&gtk::Separator::new(Orientation::Horizontal));
+    edits_panel.append(&sensitive_row);
+
+    let edits_header = GtkBox::new(Orientation::Vertical, 2);
+    let edits_title = Label::new(Some("Edits"));
+    edits_title.set_xalign(0.0);
+    edits_title.add_css_class("heading");
+    let edits_desc = Label::new(Some("Saved to *.booru.json"));
+    edits_desc.set_xalign(0.0);
+    edits_desc.add_css_class("dim-label");
+    edits_header.append(&edits_title);
+    edits_header.append(&edits_desc);
+
+    let edits_section = GtkBox::new(Orientation::Vertical, 8);
+    edits_section.add_css_class("edit-section");
+    edits_section.append(&edits_header);
+    edits_section.append(&edits_panel);
 
     let save_button = Button::with_label("Save");
     save_button.set_halign(Align::End);
     save_button.add_css_class("suggested-action");
 
-    detail_wrap.append(&title);
-    detail_wrap.append(&author);
-    detail_wrap.append(&date);
-    detail_wrap.append(&picture);
-    detail_wrap.append(&detail);
-    detail_wrap.append(&edit_group);
-    detail_wrap.append(&save_button);
+    let sheet_wrap = GtkBox::new(Orientation::Vertical, 12);
+    sheet_wrap.set_margin_start(12);
+    sheet_wrap.set_margin_end(12);
+    sheet_wrap.set_margin_top(12);
+    sheet_wrap.set_margin_bottom(12);
+    sheet_wrap.append(&edits_section);
+    sheet_wrap.append(&save_button);
+
+    let sheet_scroll = ScrolledWindow::new();
+    sheet_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    sheet_scroll.set_min_content_height(300);
+    sheet_scroll.set_child(Some(&sheet_wrap));
+    sheet_scroll.set_hexpand(true);
+    sheet_scroll.set_vexpand(true);
+
+    detail_content_wrap.append(&title);
+    detail_content_wrap.append(&author);
+    detail_content_wrap.append(&date);
+    detail_content_wrap.append(&picture);
+    detail_content_wrap.append(&detail);
 
     let detail_scroll = ScrolledWindow::new();
     let detail_clamp = Clamp::new();
     detail_clamp.set_maximum_size(960);
     detail_clamp.set_tightening_threshold(560);
-    detail_clamp.set_child(Some(&detail_wrap));
+    detail_clamp.set_child(Some(&detail_content_wrap));
     detail_scroll.set_child(Some(&detail_clamp));
     detail_scroll.set_hexpand(true);
     detail_scroll.set_vexpand(true);
+
+    let edit_bar = gtk::CenterBox::new();
+    edit_bar.add_css_class("toolbar");
+    edit_bar.set_height_request(46);
+    let edit_bar_label = Label::new(Some("Edit Metadata"));
+    edit_bar.set_center_widget(Some(&edit_bar_label));
+
+    let edit_sheet = BottomSheet::new();
+    edit_sheet.set_content(Some(&detail_scroll));
+    edit_sheet.set_sheet(Some(&sheet_scroll));
+    edit_sheet.set_bottom_bar(Some(&edit_bar));
+    edit_sheet.set_show_drag_handle(true);
+    edit_sheet.set_modal(false);
+    edit_sheet.set_can_open(false);
+    {
+        let edit_sheet = edit_sheet.clone();
+        let bar_click = gtk::GestureClick::new();
+        bar_click.connect_released(move |_, _, _, _| {
+            if edit_sheet.can_open() {
+                edit_sheet.set_open(true);
+            }
+        });
+        edit_bar.add_controller(bar_click);
+    }
 
     let empty_page = StatusPage::new();
     empty_page.set_icon_name(Some("image-x-generic-symbolic"));
@@ -748,7 +815,7 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
     let detail_stack = ViewStack::new();
     detail_stack.set_hhomogeneous(false);
     detail_stack.set_vhomogeneous(false);
-    detail_stack.add_titled(&detail_scroll, Some("detail"), "Detail");
+    detail_stack.add_titled(&edit_sheet, Some("detail"), "Detail");
     detail_stack.add_titled(&empty_page, Some("empty"), "Empty");
     detail_stack.set_visible_child_name("empty");
 
@@ -759,7 +826,7 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
     status.set_xalign(0.0);
     status.set_wrap(true);
     status.add_css_class("dim-label");
-    detail_wrap.append(&status);
+    detail_content_wrap.append(&status);
 
     content.append(&split);
     toolbar.set_content(Some(&content));
@@ -783,6 +850,7 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
         item_sensitive,
         status,
         detail_stack,
+        edit_sheet,
         toast_overlay,
         banner,
         detail_image_seq: Rc::new(Cell::new(0)),
@@ -1067,6 +1135,7 @@ fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
     };
 
     ui.detail_stack.set_visible_child_name("detail");
+    ui.edit_sheet.set_can_open(true);
     ui.title.set_text(&snapshot.2);
     ui.author.set_text(&format!("Author: {}", snapshot.3));
     ui.date.set_text(&format!("Date: {}", snapshot.4));
@@ -1142,6 +1211,8 @@ fn clear_detail(ui: &Ui) {
     }
     ui.detail_image_seq
         .set(ui.detail_image_seq.get().wrapping_add(1));
+    ui.edit_sheet.set_open(false);
+    ui.edit_sheet.set_can_open(false);
     ui.detail_stack.set_visible_child_name("empty");
     ui.title.set_text("(no match)");
     ui.author.set_text("");

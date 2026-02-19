@@ -19,6 +19,25 @@
   padding: 6px;
 }
 
+.edit-section {
+  margin-top: 8px;
+}
+
+.edit-panel {
+  background: var(--view-bg-color);
+  border-radius: 16px;
+  border: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+  padding: 14px;
+}
+
+.edit-field label {
+  font-weight: 600;
+}
+
+.edit-sensitive-row {
+  margin-top: 6px;
+}
+
 .notes-editor {
   background: var(--view-bg-color);
   border-radius: 12px;
