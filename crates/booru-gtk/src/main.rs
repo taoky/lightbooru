@@ -133,6 +133,8 @@ impl AppState {
 #[derive(Clone)]
 struct Ui {
     list: ListBox,
+    list_scroll: ScrolledWindow,
+    grid: GridView,
     grid_store: gtk::gio::ListStore,
     grid_selection: SingleSelection,
     browser_stack: ViewStack,
@@ -834,6 +836,8 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
 
     let ui = Ui {
         list,
+        list_scroll,
+        grid: grid.clone(),
         grid_store,
         grid_selection,
         browser_stack,
@@ -918,9 +922,13 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
             ui.browser_stack.set_visible_child_name(mode.as_name());
             if matches!(mode, BrowserMode::Grid) {
                 refresh_grid(&state_handle, &ui);
-                let selected_pos = state_handle.borrow().selected_pos;
-                sync_browser_selection(&ui, selected_pos);
             }
+            let selected_pos = state_handle.borrow().selected_pos;
+            sync_browser_selection(&ui, selected_pos);
+            let ui_handle = ui.clone();
+            gtk::glib::idle_add_local_once(move || {
+                ensure_selected_item_visible(&ui_handle, selected_pos);
+            });
         });
     }
 
@@ -1082,6 +1090,7 @@ fn refresh_list(state: &Rc<RefCell<AppState>>, ui: &Ui) {
     }
 
     sync_browser_selection(ui, selected_pos);
+    ensure_selected_item_visible(ui, selected_pos);
 }
 
 fn refresh_grid(state: &Rc<RefCell<AppState>>, ui: &Ui) {
@@ -1096,6 +1105,7 @@ fn refresh_grid(state: &Rc<RefCell<AppState>>, ui: &Ui) {
 
     if ui.grid_loaded_version.get() == filter_version {
         sync_browser_selection(ui, selected_pos);
+        ensure_selected_item_visible(ui, selected_pos);
         return;
     }
 
@@ -1111,6 +1121,7 @@ fn refresh_grid(state: &Rc<RefCell<AppState>>, ui: &Ui) {
 
     ui.grid_loaded_version.set(filter_version);
     sync_browser_selection(ui, selected_pos);
+    ensure_selected_item_visible(ui, selected_pos);
 }
 
 fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
@@ -1552,6 +1563,43 @@ fn sync_browser_selection(ui: &Ui, selected_pos: Option<usize>) {
             }
             if current_grid_pos.is_some() {
                 ui.grid_selection.set_selected(gtk::INVALID_LIST_POSITION);
+            }
+        }
+    }
+}
+
+fn ensure_selected_item_visible(ui: &Ui, selected_pos: Option<usize>) {
+    let Some(pos) = selected_pos else {
+        return;
+    };
+
+    match ui.browser_stack.visible_child_name().as_deref() {
+        Some("grid") => {
+            if pos < ui.grid_store.n_items() as usize {
+                ui.grid
+                    .scroll_to(pos as u32, gtk::ListScrollFlags::NONE, None);
+            }
+        }
+        _ => {
+            let Some(row) = ui.list.row_at_index(pos as i32) else {
+                return;
+            };
+            let Some(bounds) = row.compute_bounds(&ui.list) else {
+                return;
+            };
+
+            let row_top = f64::from(bounds.y());
+            let row_bottom = row_top + f64::from(bounds.height());
+            let adjustment = ui.list_scroll.vadjustment();
+            let view_top = adjustment.value();
+            let view_bottom = view_top + adjustment.page_size();
+            let min = adjustment.lower();
+            let max = (adjustment.upper() - adjustment.page_size()).max(min);
+
+            if row_top < view_top {
+                adjustment.set_value(row_top.clamp(min, max));
+            } else if row_bottom > view_bottom {
+                adjustment.set_value((row_bottom - adjustment.page_size()).clamp(min, max));
             }
         }
     }
