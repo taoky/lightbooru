@@ -58,15 +58,15 @@ impl BrowserMode {
 
 #[derive(Clone)]
 struct GridItemData {
-    title: String,
-    tooltip: String,
-    image_path: PathBuf,
+    item_idx: usize,
+    texture: Rc<RefCell<Option<gtk::gdk::Texture>>>,
 }
 
 struct AppState {
     library: Library,
     filtered_indices: Vec<usize>,
     selected_pos: Option<usize>,
+    filter_version: u64,
     browser_mode: BrowserMode,
     show_sensitive: bool,
     query: String,
@@ -79,6 +79,7 @@ impl AppState {
             library,
             filtered_indices: Vec::new(),
             selected_pos: None,
+            filter_version: 0,
             browser_mode: BrowserMode::List,
             show_sensitive,
             query: String::new(),
@@ -107,6 +108,7 @@ impl AppState {
             (Some(pos), false) => Some(pos.min(self.filtered_indices.len() - 1)),
             (None, false) => Some(0),
         };
+        self.filter_version = self.filter_version.wrapping_add(1);
     }
 
     fn selected_item_index(&self) -> Option<usize> {
@@ -134,6 +136,7 @@ struct Ui {
     toast_overlay: ToastOverlay,
     banner: Banner,
     detail_image_seq: Rc<Cell<u64>>,
+    grid_loaded_version: Rc<Cell<u64>>,
 }
 
 fn main() -> Result<()> {
@@ -293,48 +296,82 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
         list_item.set_child(Some(&card));
     });
 
-    grid_factory.connect_bind(|_, list_item_obj| {
-        let Some(list_item) = list_item_obj.downcast_ref::<gtk::ListItem>() else {
-            return;
-        };
-
-        let Some(boxed_item) = list_item
-            .item()
-            .and_then(|obj| obj.downcast::<gtk::glib::BoxedAnyObject>().ok())
-        else {
-            return;
-        };
-
-        let data = boxed_item.borrow::<GridItemData>();
-        let Some((card, thumb, caption)) = grid_cell_widgets(list_item) else {
-            return;
-        };
-
-        thumb.set_paintable(None::<&gtk::gdk::Texture>);
-        caption.set_text(&data.title);
-        card.set_tooltip_text(Some(&data.tooltip));
-
-        let tooltip_guard = data.tooltip.clone();
-        let thumb_weak = thumb.downgrade();
-        let card_weak = card.downgrade();
-        load_texture_async(data.image_path.clone(), Some((156, 156)), move |result| {
-            let Some(thumb) = thumb_weak.upgrade() else {
-                return;
-            };
-            let Some(card) = card_weak.upgrade() else {
+    {
+        let state_handle = state.clone();
+        grid_factory.connect_bind(move |_, list_item_obj| {
+            let Some(list_item) = list_item_obj.downcast_ref::<gtk::ListItem>() else {
                 return;
             };
 
-            if card.tooltip_text().as_deref() != Some(tooltip_guard.as_str()) {
+            let Some(boxed_item) = list_item
+                .item()
+                .and_then(|obj| obj.downcast::<gtk::glib::BoxedAnyObject>().ok())
+            else {
+                return;
+            };
+
+            let data = boxed_item.borrow::<GridItemData>();
+            let item_idx = data.item_idx;
+            let texture_slot = data.texture.clone();
+            drop(data);
+
+            let Some((card, thumb, caption)) = grid_cell_widgets(list_item) else {
+                return;
+            };
+
+            let (title, tooltip, image_path) = {
+                let state = state_handle.borrow();
+                let Some(item) = state.library.index.items.get(item_idx) else {
+                    thumb.set_paintable(None::<&gtk::gdk::Texture>);
+                    caption.set_text("(missing)");
+                    card.set_tooltip_text(None::<&str>);
+                    return;
+                };
+
+                let title = infer_thumbnail_title(item);
+                let tooltip = if item.merged_sensitive() {
+                    format!("[Sensitive] {}", item.image_path.display())
+                } else {
+                    item.image_path.display().to_string()
+                };
+                (title, tooltip, item.image_path.clone())
+            };
+
+            caption.set_text(&title);
+            card.set_tooltip_text(Some(&tooltip));
+
+            if let Some(texture) = texture_slot.borrow().as_ref() {
+                thumb.set_paintable(Some(texture));
                 return;
             }
 
-            match result {
-                Ok(texture) => thumb.set_paintable(Some(&texture)),
-                Err(_) => thumb.set_paintable(None::<&gtk::gdk::Texture>),
-            }
+            thumb.set_paintable(None::<&gtk::gdk::Texture>);
+            let tooltip_guard = tooltip.clone();
+            let thumb_weak = thumb.downgrade();
+            let card_weak = card.downgrade();
+            gtk::glib::MainContext::default().spawn_local(async move {
+                let result = load_texture(image_path, Some((156, 156))).await;
+                let Some(thumb) = thumb_weak.upgrade() else {
+                    return;
+                };
+                let Some(card) = card_weak.upgrade() else {
+                    return;
+                };
+
+                if card.tooltip_text().as_deref() != Some(tooltip_guard.as_str()) {
+                    return;
+                }
+
+                match result {
+                    Ok(texture) => {
+                        texture_slot.borrow_mut().replace(texture.clone());
+                        thumb.set_paintable(Some(&texture));
+                    }
+                    Err(_) => thumb.set_paintable(None::<&gtk::gdk::Texture>),
+                }
+            });
         });
-    });
+    }
 
     grid_factory.connect_unbind(|_, list_item_obj| {
         let Some(list_item) = list_item_obj.downcast_ref::<gtk::ListItem>() else {
@@ -475,6 +512,7 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
         toast_overlay,
         banner,
         detail_image_seq: Rc::new(Cell::new(0)),
+        grid_loaded_version: Rc::new(Cell::new(0)),
     };
 
     window.present();
@@ -669,36 +707,30 @@ fn refresh_list(state: &Rc<RefCell<AppState>>, ui: &Ui) {
 }
 
 fn refresh_grid(state: &Rc<RefCell<AppState>>, ui: &Ui) {
-    ui.grid_store.remove_all();
-
-    let (items, selected_pos) = {
+    let (filtered_indices, selected_pos, filter_version) = {
         let state = state.borrow();
-        let items = state
-            .filtered_indices
-            .iter()
-            .map(|item_idx| {
-                let item = &state.library.index.items[*item_idx];
-                let title = infer_thumbnail_title(item);
-                let tooltip = if item.merged_sensitive() {
-                    format!("[Sensitive] {}", item.image_path.display())
-                } else {
-                    item.image_path.display().to_string()
-                };
-                GridItemData {
-                    title,
-                    tooltip,
-                    image_path: item.image_path.clone(),
-                }
-            })
-            .collect::<Vec<GridItemData>>();
-        (items, state.selected_pos)
+        (
+            state.filtered_indices.clone(),
+            state.selected_pos,
+            state.filter_version,
+        )
     };
 
-    for item in items {
-        let boxed = gtk::glib::BoxedAnyObject::new(item);
+    if ui.grid_loaded_version.get() == filter_version {
+        sync_browser_selection(ui, selected_pos);
+        return;
+    }
+
+    ui.grid_store.remove_all();
+    for item_idx in filtered_indices {
+        let boxed = gtk::glib::BoxedAnyObject::new(GridItemData {
+            item_idx,
+            texture: Rc::new(RefCell::new(None)),
+        });
         ui.grid_store.append(&boxed);
     }
 
+    ui.grid_loaded_version.set(filter_version);
     sync_browser_selection(ui, selected_pos);
 }
 
@@ -738,8 +770,8 @@ fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
 
     let ui_handle = ui.clone();
     let image_path = snapshot.1.clone();
-    let total_items = snapshot.8;
-    load_texture_async(image_path.clone(), None, move |result| {
+    gtk::glib::MainContext::default().spawn_local(async move {
+        let result = load_texture(image_path.clone(), None).await;
         if ui_handle.detail_image_seq.get() != load_seq {
             return;
         }
@@ -747,21 +779,16 @@ fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
         match result {
             Ok(texture) => {
                 ui_handle.picture.set_paintable(Some(&texture));
-                set_status(
-                    &ui_handle,
-                    &format!(
-                        "Showing {} ({}/{})",
-                        image_path.display(),
-                        snapshot.0 + 1,
-                        total_items
-                    ),
-                );
+                set_status(&ui_handle, &format!("Showing {}", image_path.display(),));
             }
             Err(err) => {
                 ui_handle.picture.set_paintable(None::<&gtk::gdk::Texture>);
                 set_status(
                     &ui_handle,
-                    &format!("image preview unavailable: {} ({err})", image_path.display()),
+                    &format!(
+                        "image preview unavailable: {} ({err})",
+                        image_path.display()
+                    ),
                 );
             }
         }
@@ -886,26 +913,18 @@ fn grid_cell_widgets(list_item: &gtk::ListItem) -> Option<(GtkBox, Picture, Labe
     Some((card, thumb, caption))
 }
 
-fn load_texture_async<F>(path: PathBuf, scale: Option<(i32, i32)>, callback: F)
-where
-    F: FnOnce(Result<gtk::gdk::Texture, gtk::glib::Error>) + 'static,
-{
+async fn load_texture(
+    path: PathBuf,
+    scale: Option<(i32, i32)>,
+) -> Result<gtk::gdk::Texture, gtk::glib::Error> {
     let file = gtk::gio::File::for_path(path);
-    gtk::glib::MainContext::default().spawn_local(async move {
-        let result = async {
-            let stream = file.read_future(gtk::glib::Priority::DEFAULT).await?;
-            let pixbuf = if let Some((width, height)) = scale {
-                gtk::gdk_pixbuf::Pixbuf::from_stream_at_scale_future(&stream, width, height, true)
-                    .await?
-            } else {
-                gtk::gdk_pixbuf::Pixbuf::from_stream_future(&stream).await?
-            };
-            Ok::<gtk::gdk::Texture, gtk::glib::Error>(gtk::gdk::Texture::for_pixbuf(&pixbuf))
-        }
-        .await;
-
-        callback(result);
-    });
+    let stream = file.read_future(gtk::glib::Priority::DEFAULT).await?;
+    let pixbuf = if let Some((width, height)) = scale {
+        gtk::gdk_pixbuf::Pixbuf::from_stream_at_scale_future(&stream, width, height, true).await?
+    } else {
+        gtk::gdk_pixbuf::Pixbuf::from_stream_future(&stream).await?
+    };
+    Ok(gtk::gdk::Texture::for_pixbuf(&pixbuf))
 }
 
 fn sync_browser_selection(ui: &Ui, selected_pos: Option<usize>) {
