@@ -10,3 +10,5 @@ clap.workspace = true
 booru-core = { path = "../booru-core" }
 gtk = { package = "gtk4", version = "0.10", features = ["v4_12"] }
 adw = { package = "libadwaita", version = "0.8", features = ["v1_8"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -5,6 +5,8 @@ use std::rc::Rc;
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
+use tracing::{debug, warn};
+use tracing_subscriber::EnvFilter;
 
 use adw::prelude::*;
 use adw::{
@@ -157,6 +159,7 @@ struct ImageDecodeTask {
     id: u64,
     path: PathBuf,
     scale: Option<(i32, i32)>,
+    kind: ImageRequestKind,
 }
 
 #[derive(Clone)]
@@ -251,7 +254,12 @@ impl ImageLoader {
         self.callbacks.borrow_mut().insert(id, Box::new(callback));
 
         let mut dropped_ids = Vec::new();
-        let task = ImageDecodeTask { id, path, scale };
+        let task = ImageDecodeTask {
+            id,
+            path,
+            scale,
+            kind,
+        };
         {
             let (lock, condvar) = &*self.queue_state;
             let mut queues = lock.lock().expect("image queue mutex poisoned");
@@ -288,6 +296,8 @@ impl ImageLoader {
 }
 
 fn main() -> Result<()> {
+    init_tracing();
+
     let cli = Cli::parse();
     let config = if cli.base.is_empty() {
         BooruConfig::default()
@@ -310,6 +320,15 @@ fn main() -> Result<()> {
     app.run();
 
     Ok(())
+}
+
+fn init_tracing() {
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("booru_gtk=debug"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .try_init();
 }
 
 fn scan_library(config: &BooruConfig, quiet: bool) -> Result<Library> {
@@ -1107,11 +1126,20 @@ fn image_decode_worker(
             }
         };
 
+        debug!(kind = ?task.kind, path = %task.path.display(), "render");
         let outcome = decode_image_for_texture(&task.path, task.scale)
             .map(|image| ImageDecodeResult::Ok { id: task.id, image })
-            .unwrap_or_else(|message| ImageDecodeResult::Err {
-                id: task.id,
-                message,
+            .unwrap_or_else(|message| {
+                warn!(
+                    kind = ?task.kind,
+                    path = %task.path.display(),
+                    error = %message,
+                    "render failed"
+                );
+                ImageDecodeResult::Err {
+                    id: task.id,
+                    message,
+                }
             });
 
         if result_tx.send(outcome).is_err() {
