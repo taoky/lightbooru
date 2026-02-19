@@ -1,6 +1,10 @@
 use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use adw::prelude::*;
 use adw::{
@@ -137,6 +141,150 @@ struct Ui {
     banner: Banner,
     detail_image_seq: Rc<Cell<u64>>,
     grid_loaded_version: Rc<Cell<u64>>,
+    image_loader: Rc<ImageLoader>,
+}
+
+type ImageLoadCallback = Box<dyn FnOnce(Result<gtk::gdk::Texture, String>)>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ImageRequestKind {
+    Detail,
+    GridThumb,
+}
+
+#[derive(Debug)]
+struct ImageDecodeTask {
+    id: u64,
+    path: PathBuf,
+    scale: Option<(i32, i32)>,
+}
+
+#[derive(Clone)]
+struct DecodedImage {
+    width: i32,
+    height: i32,
+    rowstride: usize,
+    format: gtk::gdk::MemoryFormat,
+    pixels: gtk::glib::Bytes,
+}
+
+enum ImageDecodeResult {
+    Ok { id: u64, image: DecodedImage },
+    Err { id: u64, message: String },
+}
+
+#[derive(Default)]
+struct ImageTaskQueues {
+    detail: VecDeque<ImageDecodeTask>,
+    grid: VecDeque<ImageDecodeTask>,
+}
+
+#[derive(Clone)]
+struct ImageLoader {
+    next_id: Rc<Cell<u64>>,
+    callbacks: Rc<RefCell<HashMap<u64, ImageLoadCallback>>>,
+    queue_state: Arc<(Mutex<ImageTaskQueues>, Condvar)>,
+}
+
+impl ImageLoader {
+    fn new() -> Self {
+        let (result_tx, result_rx) = mpsc::channel::<ImageDecodeResult>();
+        let queue_state = Arc::new((Mutex::new(ImageTaskQueues::default()), Condvar::new()));
+
+        let callbacks = Rc::new(RefCell::new(HashMap::<u64, ImageLoadCallback>::new()));
+        {
+            let callbacks_handle = callbacks.clone();
+            gtk::glib::timeout_add_local(Duration::from_millis(8), move || {
+                while let Ok(message) = result_rx.try_recv() {
+                    let id = match &message {
+                        ImageDecodeResult::Ok { id, .. } => *id,
+                        ImageDecodeResult::Err { id, .. } => *id,
+                    };
+
+                    let Some(callback) = callbacks_handle.borrow_mut().remove(&id) else {
+                        continue;
+                    };
+
+                    match message {
+                        ImageDecodeResult::Ok { image, .. } => {
+                            let texture = gtk::gdk::MemoryTexture::new(
+                                image.width,
+                                image.height,
+                                image.format,
+                                &image.pixels,
+                                image.rowstride,
+                            );
+                            callback(Ok(texture.upcast::<gtk::gdk::Texture>()));
+                        }
+                        ImageDecodeResult::Err { message, .. } => callback(Err(message)),
+                    }
+                }
+
+                gtk::glib::ControlFlow::Continue
+            });
+        }
+
+        thread::Builder::new()
+            .name("booru-image-worker".to_string())
+            .spawn({
+                let queue_state = queue_state.clone();
+                move || image_decode_worker(queue_state, result_tx)
+            })
+            .expect("failed to start booru image worker thread");
+
+        Self {
+            next_id: Rc::new(Cell::new(1)),
+            callbacks,
+            queue_state,
+        }
+    }
+
+    fn load<F>(&self, path: PathBuf, scale: Option<(i32, i32)>, kind: ImageRequestKind, callback: F)
+    where
+        F: FnOnce(Result<gtk::gdk::Texture, String>) + 'static,
+    {
+        const MAX_PENDING_GRID_TASKS: usize = 96;
+        const MAX_PENDING_DETAIL_TASKS: usize = 4;
+
+        let id = self.next_id.get();
+        self.next_id.set(id.wrapping_add(1));
+        self.callbacks.borrow_mut().insert(id, Box::new(callback));
+
+        let mut dropped_ids = Vec::new();
+        let task = ImageDecodeTask { id, path, scale };
+        {
+            let (lock, condvar) = &*self.queue_state;
+            let mut queues = lock.lock().expect("image queue mutex poisoned");
+
+            match kind {
+                ImageRequestKind::Detail => {
+                    if queues.detail.len() >= MAX_PENDING_DETAIL_TASKS {
+                        if let Some(dropped) = queues.detail.pop_front() {
+                            dropped_ids.push(dropped.id);
+                        }
+                    }
+                    queues.detail.push_back(task);
+                }
+                ImageRequestKind::GridThumb => {
+                    if queues.grid.len() >= MAX_PENDING_GRID_TASKS {
+                        if let Some(dropped) = queues.grid.pop_front() {
+                            dropped_ids.push(dropped.id);
+                        }
+                    }
+                    queues.grid.push_back(task);
+                }
+            }
+
+            condvar.notify_one();
+        }
+
+        if !dropped_ids.is_empty() {
+            let mut callbacks = self.callbacks.borrow_mut();
+            for dropped_id in dropped_ids {
+                callbacks.remove(&dropped_id);
+            }
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -175,6 +323,8 @@ fn scan_library(config: &BooruConfig, quiet: bool) -> Result<Library> {
 }
 
 fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
+    let image_loader = Rc::new(ImageLoader::new());
+
     let window = ApplicationWindow::builder()
         .application(app)
         .title("lightbooru")
@@ -298,6 +448,7 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
 
     {
         let state_handle = state.clone();
+        let image_loader_handle = image_loader.clone();
         grid_factory.connect_bind(move |_, list_item_obj| {
             let Some(list_item) = list_item_obj.downcast_ref::<gtk::ListItem>() else {
                 return;
@@ -349,27 +500,31 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
             let tooltip_guard = tooltip.clone();
             let thumb_weak = thumb.downgrade();
             let card_weak = card.downgrade();
-            gtk::glib::MainContext::default().spawn_local(async move {
-                let result = load_texture(image_path, Some((156, 156))).await;
-                let Some(thumb) = thumb_weak.upgrade() else {
-                    return;
-                };
-                let Some(card) = card_weak.upgrade() else {
-                    return;
-                };
+            image_loader_handle.load(
+                image_path,
+                Some((156, 156)),
+                ImageRequestKind::GridThumb,
+                move |result| {
+                    let Some(thumb) = thumb_weak.upgrade() else {
+                        return;
+                    };
+                    let Some(card) = card_weak.upgrade() else {
+                        return;
+                    };
 
-                if card.tooltip_text().as_deref() != Some(tooltip_guard.as_str()) {
-                    return;
-                }
-
-                match result {
-                    Ok(texture) => {
-                        texture_slot.borrow_mut().replace(texture.clone());
-                        thumb.set_paintable(Some(&texture));
+                    if card.tooltip_text().as_deref() != Some(tooltip_guard.as_str()) {
+                        return;
                     }
-                    Err(_) => thumb.set_paintable(None::<&gtk::gdk::Texture>),
-                }
-            });
+
+                    match result {
+                        Ok(texture) => {
+                            texture_slot.borrow_mut().replace(texture.clone());
+                            thumb.set_paintable(Some(&texture));
+                        }
+                        Err(_) => thumb.set_paintable(None::<&gtk::gdk::Texture>),
+                    }
+                },
+            );
         });
     }
 
@@ -513,6 +668,7 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
         banner,
         detail_image_seq: Rc::new(Cell::new(0)),
         grid_loaded_version: Rc::new(Cell::new(0)),
+        image_loader,
     };
 
     window.present();
@@ -770,29 +926,42 @@ fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
 
     let ui_handle = ui.clone();
     let image_path = snapshot.1.clone();
-    gtk::glib::MainContext::default().spawn_local(async move {
-        let result = load_texture(image_path.clone(), None).await;
-        if ui_handle.detail_image_seq.get() != load_seq {
-            return;
-        }
+    let total_items = snapshot.8;
+    ui.image_loader.load(
+        image_path.clone(),
+        None,
+        ImageRequestKind::Detail,
+        move |result| {
+            if ui_handle.detail_image_seq.get() != load_seq {
+                return;
+            }
 
-        match result {
-            Ok(texture) => {
-                ui_handle.picture.set_paintable(Some(&texture));
-                set_status(&ui_handle, &format!("Showing {}", image_path.display(),));
+            match result {
+                Ok(texture) => {
+                    ui_handle.picture.set_paintable(Some(&texture));
+                    set_status(
+                        &ui_handle,
+                        &format!(
+                            "Showing {} ({}/{})",
+                            image_path.display(),
+                            snapshot.0 + 1,
+                            total_items
+                        ),
+                    );
+                }
+                Err(err) => {
+                    ui_handle.picture.set_paintable(None::<&gtk::gdk::Texture>);
+                    set_status(
+                        &ui_handle,
+                        &format!(
+                            "image preview unavailable: {} ({err})",
+                            image_path.display()
+                        ),
+                    );
+                }
             }
-            Err(err) => {
-                ui_handle.picture.set_paintable(None::<&gtk::gdk::Texture>);
-                set_status(
-                    &ui_handle,
-                    &format!(
-                        "image preview unavailable: {} ({err})",
-                        image_path.display()
-                    ),
-                );
-            }
-        }
-    });
+        },
+    );
 }
 
 fn clear_detail(ui: &Ui) {
@@ -913,18 +1082,82 @@ fn grid_cell_widgets(list_item: &gtk::ListItem) -> Option<(GtkBox, Picture, Labe
     Some((card, thumb, caption))
 }
 
-async fn load_texture(
-    path: PathBuf,
+fn image_decode_worker(
+    queue_state: Arc<(Mutex<ImageTaskQueues>, Condvar)>,
+    result_tx: mpsc::Sender<ImageDecodeResult>,
+) {
+    loop {
+        let task = {
+            let (lock, condvar) = &*queue_state;
+            let mut queues = lock.lock().expect("image queue mutex poisoned");
+
+            while queues.detail.is_empty() && queues.grid.is_empty() {
+                queues = condvar
+                    .wait(queues)
+                    .expect("image queue mutex poisoned while waiting");
+            }
+
+            if let Some(task) = queues.detail.pop_back() {
+                task
+            } else {
+                queues
+                    .grid
+                    .pop_back()
+                    .expect("grid queue unexpectedly empty")
+            }
+        };
+
+        let outcome = decode_image_for_texture(&task.path, task.scale)
+            .map(|image| ImageDecodeResult::Ok { id: task.id, image })
+            .unwrap_or_else(|message| ImageDecodeResult::Err {
+                id: task.id,
+                message,
+            });
+
+        if result_tx.send(outcome).is_err() {
+            break;
+        }
+    }
+}
+
+fn decode_image_for_texture(
+    path: &PathBuf,
     scale: Option<(i32, i32)>,
-) -> Result<gtk::gdk::Texture, gtk::glib::Error> {
-    let file = gtk::gio::File::for_path(path);
-    let stream = file.read_future(gtk::glib::Priority::DEFAULT).await?;
-    let pixbuf = if let Some((width, height)) = scale {
-        gtk::gdk_pixbuf::Pixbuf::from_stream_at_scale_future(&stream, width, height, true).await?
-    } else {
-        gtk::gdk_pixbuf::Pixbuf::from_stream_future(&stream).await?
+) -> Result<DecodedImage, String> {
+    let pixbuf = match scale {
+        Some((width, height)) => {
+            gtk::gdk_pixbuf::Pixbuf::from_file_at_scale(path, width, height, true)
+        }
+        None => gtk::gdk_pixbuf::Pixbuf::from_file(path),
+    }
+    .map_err(|err| err.to_string())?;
+
+    if pixbuf.colorspace() != gtk::gdk_pixbuf::Colorspace::Rgb {
+        return Err("unsupported pixbuf colorspace".to_string());
+    }
+    if pixbuf.bits_per_sample() != 8 {
+        return Err("unsupported bits-per-sample (expected 8)".to_string());
+    }
+
+    let format = match (pixbuf.has_alpha(), pixbuf.n_channels()) {
+        (true, 4) => gtk::gdk::MemoryFormat::R8g8b8a8,
+        (false, 3) => gtk::gdk::MemoryFormat::R8g8b8,
+        (has_alpha, channels) => {
+            return Err(format!(
+                "unsupported channel layout (has_alpha={has_alpha}, channels={channels})"
+            ));
+        }
     };
-    Ok(gtk::gdk::Texture::for_pixbuf(&pixbuf))
+
+    let rowstride =
+        usize::try_from(pixbuf.rowstride()).map_err(|_| "invalid rowstride".to_string())?;
+    Ok(DecodedImage {
+        width: pixbuf.width(),
+        height: pixbuf.height(),
+        rowstride,
+        format,
+        pixels: pixbuf.read_pixel_bytes(),
+    })
 }
 
 fn sync_browser_selection(ui: &Ui, selected_pos: Option<usize>) {
