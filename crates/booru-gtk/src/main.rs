@@ -557,17 +557,19 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
     {
         let state_handle = state.clone();
         let ui = ui.clone();
-        let grid_selection = ui.grid_selection.clone();
-        grid_selection.connect_selected_notify(move |selection| {
-            let selected_pos = match selection.selected() {
-                gtk::INVALID_LIST_POSITION => None,
-                pos => usize::try_from(pos).ok(),
-            };
+        let grid_handle = grid.clone();
+        grid_handle.connect_activate(move |_grid, position| {
+            let selected_pos = usize::try_from(position).ok();
             {
                 let mut state = state_handle.borrow_mut();
                 state.selected_pos = selected_pos.filter(|pos| *pos < state.filtered_indices.len());
             }
 
+            if let Some(pos) = selected_pos {
+                ui.grid_selection.set_selected(pos as u32);
+            } else {
+                ui.grid_selection.set_selected(gtk::INVALID_LIST_POSITION);
+            }
             sync_browser_selection(&ui, selected_pos);
             refresh_detail(&state_handle, &ui);
         });
