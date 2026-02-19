@@ -763,7 +763,9 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
 
     let sheet_scroll = ScrolledWindow::new();
     sheet_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    sheet_scroll.set_min_content_height(300);
+    sheet_scroll.set_min_content_height(460);
+    sheet_scroll.set_max_content_height(720);
+    sheet_scroll.set_propagate_natural_height(true);
     sheet_scroll.set_child(Some(&sheet_wrap));
     sheet_scroll.set_hexpand(true);
     sheet_scroll.set_vexpand(true);
