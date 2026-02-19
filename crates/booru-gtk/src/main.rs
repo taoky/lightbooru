@@ -143,6 +143,7 @@ struct Ui {
     toast_overlay: ToastOverlay,
     banner: Banner,
     detail_image_seq: Rc<Cell<u64>>,
+    detail_pending_request_id: Rc<Cell<Option<u64>>>,
     grid_loaded_version: Rc<Cell<u64>>,
     image_loader: Rc<ImageLoader>,
 }
@@ -181,6 +182,12 @@ enum ImageDecodeResult {
 struct ImageTaskQueues {
     detail: VecDeque<ImageDecodeTask>,
     grid: VecDeque<ImageDecodeTask>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ImageWorkerLane {
+    Detail,
+    Grid,
 }
 
 #[derive(Clone)]
@@ -228,13 +235,24 @@ impl ImageLoader {
             });
         }
 
-        thread::Builder::new()
-            .name("booru-image-worker".to_string())
-            .spawn({
-                let queue_state = queue_state.clone();
-                move || image_decode_worker(queue_state, result_tx)
-            })
-            .expect("failed to start booru image worker thread");
+        spawn_image_worker(
+            "booru-image-worker-detail",
+            ImageWorkerLane::Detail,
+            queue_state.clone(),
+            result_tx.clone(),
+        );
+        spawn_image_worker(
+            "booru-image-worker-grid-0",
+            ImageWorkerLane::Grid,
+            queue_state.clone(),
+            result_tx.clone(),
+        );
+        spawn_image_worker(
+            "booru-image-worker-grid-1",
+            ImageWorkerLane::Grid,
+            queue_state.clone(),
+            result_tx,
+        );
 
         Self {
             next_id: Rc::new(Cell::new(1)),
@@ -272,7 +290,7 @@ impl ImageLoader {
                 ImageRequestKind::GridThumb => queues.grid.push_back(task),
             }
 
-            condvar.notify_one();
+            condvar.notify_all();
         }
 
         id
@@ -711,6 +729,7 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
         toast_overlay,
         banner,
         detail_image_seq: Rc::new(Cell::new(0)),
+        detail_pending_request_id: Rc::new(Cell::new(None)),
         grid_loaded_version: Rc::new(Cell::new(0)),
         image_loader,
     };
@@ -966,17 +985,26 @@ fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
     hide_banner(ui);
     set_status(ui, &format!("Loading image: {}", snapshot.1.display()));
 
+    if let Some(previous_request_id) = ui.detail_pending_request_id.replace(None) {
+        ui.image_loader.cancel_if_queued(previous_request_id);
+    }
+
     let load_seq = ui.detail_image_seq.get().wrapping_add(1);
     ui.detail_image_seq.set(load_seq);
 
     let ui_handle = ui.clone();
     let image_path = snapshot.1.clone();
     let total_items = snapshot.8;
-    ui.image_loader.load(
+    let pending_request_slot = ui.detail_pending_request_id.clone();
+    let request_id = ui.image_loader.load(
         image_path.clone(),
         None,
         ImageRequestKind::Detail,
-        move |_, result| {
+        move |finished_id, result| {
+            if pending_request_slot.get() == Some(finished_id) {
+                pending_request_slot.set(None);
+            }
+
             if ui_handle.detail_image_seq.get() != load_seq {
                 return;
             }
@@ -1007,9 +1035,13 @@ fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
             }
         },
     );
+    ui.detail_pending_request_id.set(Some(request_id));
 }
 
 fn clear_detail(ui: &Ui) {
+    if let Some(request_id) = ui.detail_pending_request_id.replace(None) {
+        ui.image_loader.cancel_if_queued(request_id);
+    }
     ui.detail_image_seq
         .set(ui.detail_image_seq.get().wrapping_add(1));
     ui.detail_stack.set_visible_child_name("empty");
@@ -1128,6 +1160,7 @@ fn grid_cell_widgets(list_item: &gtk::ListItem) -> Option<(GtkBox, Picture, Labe
 }
 
 fn image_decode_worker(
+    lane: ImageWorkerLane,
     queue_state: Arc<(Mutex<ImageTaskQueues>, Condvar)>,
     result_tx: mpsc::Sender<ImageDecodeResult>,
 ) {
@@ -1136,27 +1169,21 @@ fn image_decode_worker(
             let (lock, condvar) = &*queue_state;
             let mut queues = lock.lock().expect("image queue mutex poisoned");
 
-            while queues.detail.is_empty() && queues.grid.is_empty() {
+            while queue_is_empty_for_lane(&queues, lane) {
                 queues = condvar
                     .wait(queues)
                     .expect("image queue mutex poisoned while waiting");
             }
 
-            if let Some(task) = queues.detail.pop_back() {
-                task
-            } else {
-                queues
-                    .grid
-                    .pop_back()
-                    .expect("grid queue unexpectedly empty")
-            }
+            pop_task_for_lane(&mut queues, lane).expect("worker lane queue unexpectedly empty")
         };
 
-        debug!(kind = ?task.kind, path = %task.path.display(), "render");
+        debug!(lane = ?lane, kind = ?task.kind, path = %task.path.display(), "render");
         let outcome = decode_image_for_texture(&task.path, task.scale)
             .map(|image| ImageDecodeResult::Ok { id: task.id, image })
             .unwrap_or_else(|message| {
                 warn!(
+                    lane = ?lane,
                     kind = ?task.kind,
                     path = %task.path.display(),
                     error = %message,
@@ -1171,6 +1198,35 @@ fn image_decode_worker(
         if result_tx.send(outcome).is_err() {
             break;
         }
+    }
+}
+
+fn spawn_image_worker(
+    name: &str,
+    lane: ImageWorkerLane,
+    queue_state: Arc<(Mutex<ImageTaskQueues>, Condvar)>,
+    result_tx: mpsc::Sender<ImageDecodeResult>,
+) {
+    thread::Builder::new()
+        .name(name.to_string())
+        .spawn(move || image_decode_worker(lane, queue_state, result_tx))
+        .expect("failed to start booru image worker thread");
+}
+
+fn queue_is_empty_for_lane(queues: &ImageTaskQueues, lane: ImageWorkerLane) -> bool {
+    match lane {
+        ImageWorkerLane::Detail => queues.detail.is_empty(),
+        ImageWorkerLane::Grid => queues.grid.is_empty(),
+    }
+}
+
+fn pop_task_for_lane(
+    queues: &mut ImageTaskQueues,
+    lane: ImageWorkerLane,
+) -> Option<ImageDecodeTask> {
+    match lane {
+        ImageWorkerLane::Detail => queues.detail.pop_back(),
+        ImageWorkerLane::Grid => queues.grid.pop_front(),
     }
 }
 
