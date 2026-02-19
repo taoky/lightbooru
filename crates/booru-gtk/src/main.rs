@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -133,6 +133,7 @@ struct Ui {
     detail_stack: ViewStack,
     toast_overlay: ToastOverlay,
     banner: Banner,
+    detail_image_seq: Rc<Cell<u64>>,
 }
 
 fn main() -> Result<()> {
@@ -309,9 +310,30 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
             return;
         };
 
-        thumb.set_filename(Some(&data.image_path));
+        thumb.set_paintable(None::<&gtk::gdk::Texture>);
         caption.set_text(&data.title);
         card.set_tooltip_text(Some(&data.tooltip));
+
+        let tooltip_guard = data.tooltip.clone();
+        let thumb_weak = thumb.downgrade();
+        let card_weak = card.downgrade();
+        load_texture_async(data.image_path.clone(), Some((156, 156)), move |result| {
+            let Some(thumb) = thumb_weak.upgrade() else {
+                return;
+            };
+            let Some(card) = card_weak.upgrade() else {
+                return;
+            };
+
+            if card.tooltip_text().as_deref() != Some(tooltip_guard.as_str()) {
+                return;
+            }
+
+            match result {
+                Ok(texture) => thumb.set_paintable(Some(&texture)),
+                Err(_) => thumb.set_paintable(None::<&gtk::gdk::Texture>),
+            }
+        });
     });
 
     grid_factory.connect_unbind(|_, list_item_obj| {
@@ -452,6 +474,7 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
         detail_stack,
         toast_overlay,
         banner,
+        detail_image_seq: Rc::new(Cell::new(0)),
     };
 
     window.present();
@@ -695,6 +718,7 @@ fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
             item.merged_detail().unwrap_or_default(),
             item.merged_tags().join(" "),
             item.merged_sensitive(),
+            state.library.index.items.len(),
         )
     };
 
@@ -705,35 +729,48 @@ fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
     ui.detail.set_text(&snapshot.5);
     ui.tags.set_text(&snapshot.6);
     ui.item_sensitive.set_active(snapshot.7);
+    ui.picture.set_paintable(None::<&gtk::gdk::Texture>);
     hide_banner(ui);
+    set_status(ui, &format!("Loading image: {}", snapshot.1.display()));
 
-    match gtk::gdk::Texture::from_filename(&snapshot.1) {
-        Ok(texture) => {
-            ui.picture.set_paintable(Some(&texture));
-            set_status(
-                ui,
-                &format!(
-                    "Showing {} ({}/{})",
-                    snapshot.1.display(),
-                    snapshot.0 + 1,
-                    state.borrow().library.index.items.len()
-                ),
-            );
+    let load_seq = ui.detail_image_seq.get().wrapping_add(1);
+    ui.detail_image_seq.set(load_seq);
+
+    let ui_handle = ui.clone();
+    let image_path = snapshot.1.clone();
+    let total_items = snapshot.8;
+    load_texture_async(image_path.clone(), None, move |result| {
+        if ui_handle.detail_image_seq.get() != load_seq {
+            return;
         }
-        Err(err) => {
-            ui.picture.set_paintable(None::<&gtk::gdk::Texture>);
-            set_status(
-                ui,
-                &format!(
-                    "image preview unavailable: {} ({err})",
-                    snapshot.1.display()
-                ),
-            );
+
+        match result {
+            Ok(texture) => {
+                ui_handle.picture.set_paintable(Some(&texture));
+                set_status(
+                    &ui_handle,
+                    &format!(
+                        "Showing {} ({}/{})",
+                        image_path.display(),
+                        snapshot.0 + 1,
+                        total_items
+                    ),
+                );
+            }
+            Err(err) => {
+                ui_handle.picture.set_paintable(None::<&gtk::gdk::Texture>);
+                set_status(
+                    &ui_handle,
+                    &format!("image preview unavailable: {} ({err})", image_path.display()),
+                );
+            }
         }
-    }
+    });
 }
 
 fn clear_detail(ui: &Ui) {
+    ui.detail_image_seq
+        .set(ui.detail_image_seq.get().wrapping_add(1));
     ui.detail_stack.set_visible_child_name("empty");
     ui.title.set_text("(no match)");
     ui.author.set_text("");
@@ -847,6 +884,28 @@ fn grid_cell_widgets(list_item: &gtk::ListItem) -> Option<(GtkBox, Picture, Labe
     let thumb = card.first_child()?.downcast::<Picture>().ok()?;
     let caption = thumb.next_sibling()?.downcast::<Label>().ok()?;
     Some((card, thumb, caption))
+}
+
+fn load_texture_async<F>(path: PathBuf, scale: Option<(i32, i32)>, callback: F)
+where
+    F: FnOnce(Result<gtk::gdk::Texture, gtk::glib::Error>) + 'static,
+{
+    let file = gtk::gio::File::for_path(path);
+    gtk::glib::MainContext::default().spawn_local(async move {
+        let result = async {
+            let stream = file.read_future(gtk::glib::Priority::DEFAULT).await?;
+            let pixbuf = if let Some((width, height)) = scale {
+                gtk::gdk_pixbuf::Pixbuf::from_stream_at_scale_future(&stream, width, height, true)
+                    .await?
+            } else {
+                gtk::gdk_pixbuf::Pixbuf::from_stream_future(&stream).await?
+            };
+            Ok::<gtk::gdk::Texture, gtk::glib::Error>(gtk::gdk::Texture::for_pixbuf(&pixbuf))
+        }
+        .await;
+
+        callback(result);
+    });
 }
 
 fn sync_browser_selection(ui: &Ui, selected_pos: Option<usize>) {
