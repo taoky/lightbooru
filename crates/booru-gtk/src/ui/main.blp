@@ -8,6 +8,15 @@ Adw.ApplicationWindow main_window {
   width-request: 600;
   height-request: 900;
 
+  Adw.Breakpoint compact_breakpoint {
+    condition("max-width: 960sp")
+
+    setters {
+      split.collapsed: true;
+      split.show-content: false;
+    }
+  }
+
   content: Adw.ToastOverlay toast_overlay {
     child: Adw.ToolbarView toolbar {
       [top]
@@ -30,6 +39,7 @@ Adw.ApplicationWindow main_window {
           icon-name: "system-search-symbolic";
           tooltip-text: "Search";
           css-classes: ["flat"];
+          toggled => $on_search_button_toggled();
         }
 
         [start]
@@ -54,6 +64,7 @@ Adw.ApplicationWindow main_window {
         MenuButton menu_button {
           icon-name: "open-menu-symbolic";
           tooltip-text: "Main menu";
+          menu-model: main_menu;
         }
       }
 
@@ -62,6 +73,7 @@ Adw.ApplicationWindow main_window {
         show-close-button: true;
         search-mode-enabled: false;
         key-capture-widget: main_window;
+        notify::search-mode-enabled => $on_search_mode_enabled();
 
         child: SearchEntry search {
           placeholder-text: "Search tags/author/detail";
@@ -85,6 +97,8 @@ Adw.ApplicationWindow main_window {
           max-sidebar-width: 440;
           sidebar-width-fraction: 0.32;
           show-content: true;
+          notify::collapsed => $on_split_layout_changed();
+          notify::show-content => $on_split_layout_changed();
 
           sidebar: Adw.NavigationPage sidebar_page {
             title: "Library";
@@ -361,4 +375,9 @@ Button tags_add_button {
   icon-name: "list-add-symbolic";
   tooltip-text: "Add tags from input";
   css-classes: ["flat", "circular"];
+}
+
+menu main_menu {
+  item ("Show sensitive", "win.show-sensitive")
+  item ("Rescan library", "win.rescan")
 }
