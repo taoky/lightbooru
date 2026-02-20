@@ -33,10 +33,8 @@ impl Ui {
     ) -> (Self, UiControls) {
         let window: ApplicationWindow = builder_object(builder, "main_window");
         let toast_overlay: ToastOverlay = builder_object(builder, "toast_overlay");
-        let compact_back_button: Button = builder_object(builder, "compact_back_button");
         let search: SearchEntry = builder_object(builder, "search");
         let search_bar: gtk::SearchBar = builder_object(builder, "search_bar");
-        let search_button: gtk::ToggleButton = builder_object(builder, "search_button");
         let browse_mode_group: ToggleGroup = builder_object(builder, "browse_mode_group");
         let banner: Banner = builder_object(builder, "banner");
         let split: NavigationSplitView = builder_object(builder, "split");
@@ -94,10 +92,8 @@ impl Ui {
 
         let controls = UiControls {
             window,
-            compact_back_button,
             search,
             search_bar,
-            search_button,
             browse_mode_group,
             split,
             save_button,
@@ -131,7 +127,7 @@ pub(crate) fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
         .set_active_name(Some(browser_mode.as_name()));
     ui.browser_stack
         .set_visible_child_name(browser_mode.as_name());
-    sync_compact_controls(&controls);
+    ui.detail_stack.set_visible_child_name("empty");
     install_edit_sheet_open_gesture(&controls.edit_bar, &ui.edit_sheet);
     rebuild_tag_wrap(&ui);
     controls.window.present();
@@ -165,30 +161,6 @@ fn install_builder_callbacks(scope: &gtk::BuilderRustScope, builder: &gtk::Build
         }
         None
     });
-
-    let builder_for_split = builder.clone();
-    scope.add_callback("on_split_layout_changed", move |_| {
-        let compact_back_button: Button = builder_object(&builder_for_split, "compact_back_button");
-        let split: NavigationSplitView = builder_object(&builder_for_split, "split");
-        let search_button: gtk::ToggleButton = builder_object(&builder_for_split, "search_button");
-        let browse_mode_group: ToggleGroup =
-            builder_object(&builder_for_split, "browse_mode_group");
-        let search_bar: gtk::SearchBar = builder_object(&builder_for_split, "search_bar");
-
-        sync_compact_back_button(&compact_back_button, &split);
-        sync_compact_header_controls(&search_button, &browse_mode_group, &search_bar, &split);
-        None
-    });
-}
-
-fn sync_compact_controls(controls: &UiControls) {
-    sync_compact_back_button(&controls.compact_back_button, &controls.split);
-    sync_compact_header_controls(
-        &controls.search_button,
-        &controls.browse_mode_group,
-        &controls.search_bar,
-        &controls.split,
-    );
 }
 
 fn install_edit_sheet_open_gesture(edit_bar: &gtk::CenterBox, edit_sheet: &BottomSheet) {
@@ -376,23 +348,6 @@ fn connect_ui_signals(state: &Rc<RefCell<AppState>>, ui: &Ui, controls: &UiContr
         controls.window.add_action(&rescan_action);
     }
     {
-        let split = controls.split.clone();
-        let state_handle = state.clone();
-        let ui = ui.clone();
-        let compact_back_button = controls.compact_back_button.clone();
-        compact_back_button.connect_clicked(move |_| {
-            if split.is_collapsed() && split.shows_content() {
-                {
-                    let mut state = state_handle.borrow_mut();
-                    state.selected_pos = None;
-                }
-                sync_browser_selection(&ui, None);
-                refresh_detail(&state_handle, &ui);
-                split.set_show_content(false);
-            }
-        });
-    }
-    {
         let ui = ui.clone();
         let tags_input = ui.tags_input.clone();
         tags_input.connect_activate(move |_| {
@@ -551,30 +506,4 @@ fn setup_grid_factory(
     grid.set_max_columns(4);
     grid.set_min_columns(2);
     (grid_store, grid_selection)
-}
-
-fn sync_compact_back_button(button: &Button, split: &NavigationSplitView) {
-    let show_button = split.is_collapsed() && split.shows_content();
-    button.set_visible(show_button);
-    button.set_sensitive(show_button);
-}
-
-fn sync_compact_header_controls(
-    search_button: &gtk::ToggleButton,
-    browse_mode_group: &ToggleGroup,
-    search_bar: &gtk::SearchBar,
-    split: &NavigationSplitView,
-) {
-    let show_controls = !(split.is_collapsed() && split.shows_content());
-    search_button.set_visible(show_controls);
-    browse_mode_group.set_visible(show_controls);
-
-    if !show_controls {
-        if search_button.is_active() {
-            search_button.set_active(false);
-        }
-        if search_bar.is_search_mode() {
-            search_bar.set_search_mode(false);
-        }
-    }
 }

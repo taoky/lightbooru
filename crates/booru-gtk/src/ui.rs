@@ -139,10 +139,8 @@ struct Ui {
 #[derive(Clone)]
 struct UiControls {
     window: ApplicationWindow,
-    compact_back_button: Button,
     search: SearchEntry,
     search_bar: gtk::SearchBar,
-    search_button: gtk::ToggleButton,
     browse_mode_group: ToggleGroup,
     split: NavigationSplitView,
     save_button: Button,

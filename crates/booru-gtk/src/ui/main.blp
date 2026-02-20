@@ -18,92 +18,84 @@ Adw.ApplicationWindow main_window {
   }
 
   content: Adw.ToastOverlay toast_overlay {
-    child: Adw.ToolbarView toolbar {
-      [top]
-      Adw.HeaderBar header {
-        title-widget: Adw.WindowTitle window_title {
-          title: "lightbooru";
-          subtitle: "gallery-dl local library";
-        };
+    child: Box root_content {
+      orientation: vertical;
+      spacing: 0;
+      vexpand: true;
 
-        [start]
-        Button compact_back_button {
-          icon-name: "go-previous-symbolic";
-          tooltip-text: "Back to library";
-          visible: false;
-          css-classes: ["flat"];
-        }
-
-        [start]
-        ToggleButton search_button {
-          icon-name: "system-search-symbolic";
-          tooltip-text: "Search";
-          css-classes: ["flat"];
-          toggled => $on_search_button_toggled();
-        }
-
-        [start]
-        Adw.ToggleGroup browse_mode_group {
-          can-shrink: true;
-          homogeneous: true;
-
-          Adw.Toggle list_toggle {
-            name: "list";
-            icon-name: "view-list-symbolic";
-            tooltip: "List mode";
-          }
-
-          Adw.Toggle grid_toggle {
-            name: "grid";
-            icon-name: "view-grid-symbolic";
-            tooltip: "Thumbnail mode";
-          }
-        }
-
-        [end]
-        MenuButton menu_button {
-          icon-name: "open-menu-symbolic";
-          tooltip-text: "Main menu";
-          menu-model: main_menu;
-        }
+      Adw.Banner banner {
+        title: "";
+        revealed: false;
       }
 
-      [top]
-      SearchBar search_bar {
-        show-close-button: true;
-        search-mode-enabled: false;
-        key-capture-widget: main_window;
-        notify::search-mode-enabled => $on_search_mode_enabled();
-
-        child: SearchEntry search {
-          placeholder-text: "Search tags/author/detail";
-        };
-      }
-
-      content: Box content {
-        orientation: vertical;
-        spacing: 0;
+      Adw.NavigationSplitView split {
+        hexpand: true;
         vexpand: true;
+        min-sidebar-width: 400;
+        max-sidebar-width: 500;
+        sidebar-width-fraction: 0.32;
+        show-content: true;
 
-        Adw.Banner banner {
-          title: "";
-          revealed: false;
-        }
+        sidebar: Adw.NavigationPage sidebar_page {
+          title: "Library";
+          tag: "sidebar";
 
-        Adw.NavigationSplitView split {
-          hexpand: true;
-          vexpand: true;
-          min-sidebar-width: 400;
-          max-sidebar-width: 500;
-          sidebar-width-fraction: 0.32;
-          show-content: true;
-          notify::collapsed => $on_split_layout_changed();
-          notify::show-content => $on_split_layout_changed();
+          child: Adw.ToolbarView sidebar_toolbar {
+            [top]
+            Adw.HeaderBar sidebar_header {
+              title-widget: Adw.WindowTitle window_title {
+                title: "lightbooru";
+                subtitle: "gallery-dl local library";
+              };
 
-          sidebar: Adw.NavigationPage sidebar_page {
-            title: "Library";
+              [start]
+              ToggleButton search_button {
+                icon-name: "system-search-symbolic";
+                tooltip-text: "Search";
+                css-classes: ["flat"];
+                toggled => $on_search_button_toggled();
+              }
 
-            child: Adw.ViewStack browser_stack {
+              [start]
+              Adw.ToggleGroup browse_mode_group {
+                can-shrink: true;
+                homogeneous: true;
+
+                Adw.Toggle list_toggle {
+                  name: "list";
+                  icon-name: "view-list-symbolic";
+                  tooltip: "List mode";
+                }
+
+                Adw.Toggle grid_toggle {
+                  name: "grid";
+                  icon-name: "view-grid-symbolic";
+                  tooltip: "Thumbnail mode";
+                }
+              }
+
+              [end]
+              MenuButton menu_button {
+                icon-name: "open-menu-symbolic";
+                tooltip-text: "Main menu";
+                menu-model: main_menu;
+              }
+            }
+
+            [top]
+            SearchBar search_bar {
+              show-close-button: false;
+              search-mode-enabled: false;
+              key-capture-widget: main_window;
+              notify::search-mode-enabled => $on_search_mode_enabled();
+
+              child: SearchEntry search {
+                hexpand: true;
+                placeholder-text: "Search tags/author/detail";
+              };
+            }
+
+            content: Adw.ViewStack browser_stack {
               hhomogeneous: false;
               vhomogeneous: false;
 
@@ -140,14 +132,20 @@ Adw.ApplicationWindow main_window {
               }
             };
           };
+        };
 
-          content: Adw.NavigationPage detail_page {
-            title: "Details";
+        content: Adw.NavigationPage detail_page {
+          title: "Details";
+          tag: "detail";
 
-            child: Adw.ViewStack detail_stack {
+          child: Adw.ToolbarView detail_toolbar {
+            [top]
+            Adw.HeaderBar detail_header {
+            }
+
+            content: Adw.ViewStack detail_stack {
               hhomogeneous: false;
               vhomogeneous: false;
-              visible-child-name: "empty";
 
               Adw.ViewStackPage {
                 name: "detail";
@@ -365,8 +363,8 @@ Adw.ApplicationWindow main_window {
               }
             };
           };
-        }
-      };
+        };
+      }
     };
   };
 }
