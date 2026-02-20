@@ -492,12 +492,11 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
 
     let list = ListBox::new();
     list.set_selection_mode(SelectionMode::Single);
-    list.add_css_class("boxed-list");
+    list.add_css_class("navigation-sidebar");
     let list_scroll = ScrolledWindow::new();
     list_scroll.set_child(Some(&list));
     list_scroll.set_hexpand(true);
     list_scroll.set_vexpand(true);
-    list_scroll.add_css_class("navigation-sidebar");
 
     let grid_store = gtk::gio::ListStore::new::<gtk::glib::BoxedAnyObject>();
     let grid_selection = SingleSelection::new(Some(grid_store.clone()));
@@ -661,11 +660,11 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
     grid.set_single_click_activate(false);
     grid.set_max_columns(4);
     grid.set_min_columns(2);
+    grid.add_css_class("navigation-sidebar");
     let grid_scroll = ScrolledWindow::new();
     grid_scroll.set_child(Some(&grid));
     grid_scroll.set_hexpand(true);
     grid_scroll.set_vexpand(true);
-    grid_scroll.add_css_class("navigation-sidebar");
 
     let browser_stack = ViewStack::new();
     browser_stack.set_hhomogeneous(false);
