@@ -10,8 +10,8 @@ use tracing_subscriber::EnvFilter;
 
 use adw::prelude::*;
 use adw::{
-    ActionRow, Application, ApplicationWindow, Banner, BottomSheet, Clamp, HeaderBar,
-    NavigationPage,
+    ActionRow, Application, ApplicationWindow, Banner, BottomSheet, Breakpoint,
+    BreakpointCondition, Clamp, HeaderBar, NavigationPage,
     NavigationSplitView, StatusPage, Toast, ToastOverlay, Toggle, ToggleGroup,
     ToolbarView, ViewStack, WindowTitle, WrapBox,
 };
@@ -379,6 +379,8 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
         .title("lightbooru")
         .default_width(1280)
         .default_height(960)
+        .width_request(600)
+        .height_request(900)
         .build();
 
     let toast_overlay = ToastOverlay::new();
@@ -388,6 +390,12 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
     let header = HeaderBar::new();
     let window_title = WindowTitle::new("lightbooru", "gallery-dl local library");
     header.set_title_widget(Some(&window_title));
+
+    let compact_back_button = Button::from_icon_name("go-previous-symbolic");
+    compact_back_button.add_css_class("flat");
+    compact_back_button.set_tooltip_text(Some("Back to library"));
+    compact_back_button.set_visible(false);
+    header.pack_start(&compact_back_button);
 
     let search = SearchEntry::new();
     search.set_placeholder_text(Some("Search tags/author/detail"));
@@ -450,6 +458,37 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
     split.set_max_sidebar_width(440.0);
     split.set_sidebar_width_fraction(0.32);
     split.set_show_content(true);
+    install_split_breakpoint(&window, &split);
+    sync_compact_back_button(&compact_back_button, &split);
+    sync_compact_header_controls(&search_button, &browse_mode_group, &search_bar, &split);
+    {
+        let compact_back_button = compact_back_button.clone();
+        split.connect_collapsed_notify(move |split| {
+            sync_compact_back_button(&compact_back_button, split);
+        });
+    }
+    {
+        let compact_back_button = compact_back_button.clone();
+        split.connect_show_content_notify(move |split| {
+            sync_compact_back_button(&compact_back_button, split);
+        });
+    }
+    {
+        let search_button = search_button.clone();
+        let browse_mode_group = browse_mode_group.clone();
+        let search_bar = search_bar.clone();
+        split.connect_collapsed_notify(move |split| {
+            sync_compact_header_controls(&search_button, &browse_mode_group, &search_bar, split);
+        });
+    }
+    {
+        let search_button = search_button.clone();
+        let browse_mode_group = browse_mode_group.clone();
+        let search_bar = search_bar.clone();
+        split.connect_show_content_notify(move |split| {
+            sync_compact_header_controls(&search_button, &browse_mode_group, &search_bar, split);
+        });
+    }
 
     let list = ListBox::new();
     list.set_selection_mode(SelectionMode::Single);
@@ -870,6 +909,24 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
     rebuild_view(&state, &ui);
 
     {
+        let split = split.clone();
+        let state_handle = state.clone();
+        let ui = ui.clone();
+        let compact_back_button = compact_back_button.clone();
+        compact_back_button.connect_clicked(move |_| {
+            if split.is_collapsed() && split.shows_content() {
+                {
+                    let mut state = state_handle.borrow_mut();
+                    state.selected_pos = None;
+                }
+                sync_browser_selection(&ui, None);
+                refresh_detail(&state_handle, &ui);
+                split.set_show_content(false);
+            }
+        });
+    }
+
+    {
         let search_bar = search_bar.clone();
         let search = search.clone();
         search_button.connect_toggled(move |button| {
@@ -974,6 +1031,7 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
     {
         let state_handle = state.clone();
         let ui = ui.clone();
+        let split = split.clone();
         let list_handle = ui.list.clone();
         list_handle.connect_row_selected(move |_list, row| {
             let mut state = state_handle.borrow_mut();
@@ -984,12 +1042,25 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
             drop(state);
             sync_browser_selection(&ui, selected_pos);
             refresh_detail(&state_handle, &ui);
+            if split.is_collapsed() {
+                split.set_show_content(selected_pos.is_some());
+            }
+        });
+    }
+    {
+        let split = split.clone();
+        let list_handle = ui.list.clone();
+        list_handle.connect_row_activated(move |_, _| {
+            if split.is_collapsed() {
+                split.set_show_content(true);
+            }
         });
     }
 
     {
         let state_handle = state.clone();
         let ui = ui.clone();
+        let split = split.clone();
         let grid_selection_handle = ui.grid_selection.clone();
         grid_selection_handle.connect_selected_notify(move |selection| {
             let selected_pos = match selection.selected() {
@@ -1008,6 +1079,34 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
 
             sync_browser_selection(&ui, selected_pos);
             refresh_detail(&state_handle, &ui);
+            if split.is_collapsed() {
+                split.set_show_content(selected_pos.is_some());
+            }
+        });
+    }
+    {
+        let state_handle = state.clone();
+        let ui = ui.clone();
+        let split = split.clone();
+        let grid_handle = ui.grid.clone();
+        grid_handle.connect_activate(move |_, pos| {
+            let activated_pos = usize::try_from(pos).ok();
+            let (selected_pos, changed) = {
+                let mut state = state_handle.borrow_mut();
+                let selected_pos =
+                    activated_pos.filter(|position| *position < state.filtered_indices.len());
+                let changed = state.selected_pos != selected_pos;
+                state.selected_pos = selected_pos;
+                (selected_pos, changed)
+            };
+
+            if changed {
+                sync_browser_selection(&ui, selected_pos);
+                refresh_detail(&state_handle, &ui);
+            }
+            if split.is_collapsed() {
+                split.set_show_content(selected_pos.is_some());
+            }
         });
     }
 
@@ -1033,6 +1132,40 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
             }
         });
         window.add_action(&rescan_action);
+    }
+}
+
+fn install_split_breakpoint(window: &ApplicationWindow, split: &NavigationSplitView) {
+    let compact_condition =
+        BreakpointCondition::parse("max-width: 960sp").expect("valid breakpoint condition");
+    let compact_breakpoint = Breakpoint::new(compact_condition);
+    compact_breakpoint.add_setters(&[(split, "collapsed", true), (split, "show-content", false)]);
+    window.add_breakpoint(compact_breakpoint);
+}
+
+fn sync_compact_back_button(button: &Button, split: &NavigationSplitView) {
+    let show_button = split.is_collapsed() && split.shows_content();
+    button.set_visible(show_button);
+    button.set_sensitive(show_button);
+}
+
+fn sync_compact_header_controls(
+    search_button: &gtk::ToggleButton,
+    browse_mode_group: &ToggleGroup,
+    search_bar: &gtk::SearchBar,
+    split: &NavigationSplitView,
+) {
+    let show_controls = !(split.is_collapsed() && split.shows_content());
+    search_button.set_visible(show_controls);
+    browse_mode_group.set_visible(show_controls);
+
+    if !show_controls {
+        if search_button.is_active() {
+            search_button.set_active(false);
+        }
+        if search_bar.is_search_mode() {
+            search_bar.set_search_mode(false);
+        }
     }
 }
 
