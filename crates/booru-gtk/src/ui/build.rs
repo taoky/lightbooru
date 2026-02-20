@@ -14,7 +14,7 @@ use super::view::{
     append_pending_tags_input, ensure_selected_item_visible, grid_cell_widgets,
     infer_thumbnail_title, install_tag_editor_css, rebuild_tag_wrap, rebuild_view, refresh_detail,
     refresh_grid, rescan_library, save_selected_edits, set_status, show_banner, show_toast,
-    sync_browser_selection,
+    sync_browser_selection, open_selected_file, open_selected_source_url,
 };
 use super::*;
 
@@ -46,6 +46,8 @@ impl Ui {
         let title: Label = builder_object(builder, "title");
         let author: Label = builder_object(builder, "author");
         let date: Label = builder_object(builder, "date");
+        let source_url: gtk::LinkButton = builder_object(builder, "source_url");
+        let open_file_button: Button = builder_object(builder, "open_file_button");
         let detail: Label = builder_object(builder, "detail");
         let tags_wrap: WrapBox = builder_object(builder, "tags_wrap");
         let tags_add_button: Button = builder_object(builder, "tags_add_button");
@@ -72,6 +74,8 @@ impl Ui {
             title,
             author,
             date,
+            source_url,
+            open_file_button,
             detail,
             tags_wrap,
             tags_add_button,
@@ -174,7 +178,40 @@ fn install_edit_sheet_open_gesture(edit_bar: &gtk::CenterBox, edit_sheet: &Botto
     edit_bar.add_controller(bar_click);
 }
 
+fn build_item_context_popover(parent: &impl gtk::prelude::IsA<gtk::Widget>) -> gtk::PopoverMenu {
+    let menu = gtk::gio::Menu::new();
+    menu.append(Some("Open file"), Some("win.open-file"));
+    menu.append(Some("Open source URL"), Some("win.open-source-url"));
+    let popover = gtk::PopoverMenu::from_model(Some(&menu));
+    popover.set_parent(parent);
+    popover
+}
+
+fn popup_context_menu(popover: &gtk::PopoverMenu, x: f64, y: f64) {
+    popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
+        x as i32, y as i32, 1, 1,
+    )));
+    popover.popup();
+}
+
 fn connect_ui_signals(state: &Rc<RefCell<AppState>>, ui: &Ui, controls: &UiControls) {
+    {
+        let list = ui.list.clone();
+        let popover = build_item_context_popover(&list);
+
+        let list_handle = list.clone();
+        let popover_handle = popover.clone();
+        let right_click = gtk::GestureClick::builder().button(3).build();
+        right_click.connect_pressed(move |gesture, _, x, y| {
+            let Some(row) = list_handle.row_at_y(y as i32) else {
+                return;
+            };
+            list_handle.select_row(Some(&row));
+            popup_context_menu(&popover_handle, x, y);
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+        });
+        list.add_controller(right_click);
+    }
     {
         let search_bar = controls.search_bar.clone();
         let search = controls.search.clone();
@@ -190,6 +227,32 @@ fn connect_ui_signals(state: &Rc<RefCell<AppState>>, ui: &Ui, controls: &UiContr
             gtk::glib::Propagation::Proceed
         });
         controls.window.add_controller(key_controller);
+    }
+    {
+        let state_handle = state.clone();
+        let ui = ui.clone();
+        let open_file_button = ui.open_file_button.clone();
+        open_file_button.connect_clicked(move |_| {
+            open_selected_file(&state_handle, &ui);
+        });
+    }
+    {
+        let state_handle = state.clone();
+        let ui = ui.clone();
+        let open_file_action = gtk::gio::SimpleAction::new("open-file", None);
+        open_file_action.connect_activate(move |_, _| {
+            open_selected_file(&state_handle, &ui);
+        });
+        controls.window.add_action(&open_file_action);
+    }
+    {
+        let state_handle = state.clone();
+        let ui = ui.clone();
+        let open_source_action = gtk::gio::SimpleAction::new("open-source-url", None);
+        open_source_action.connect_activate(move |_, _| {
+            open_selected_source_url(&state_handle, &ui);
+        });
+        controls.window.add_action(&open_source_action);
     }
     {
         let split = controls.split.clone();
@@ -385,15 +448,36 @@ fn setup_grid_factory(
     grid_selection.set_can_unselect(true);
 
     let grid_factory = SignalListItemFactory::new();
-    grid_factory.connect_setup(|_, list_item_obj| {
-        let Some(list_item) = list_item_obj.downcast_ref::<gtk::ListItem>() else {
-            return;
-        };
+    {
+        let grid_selection_handle = grid_selection.clone();
+        grid_factory.connect_setup(move |_, list_item_obj| {
+            let Some(list_item) = list_item_obj.downcast_ref::<gtk::ListItem>() else {
+                return;
+            };
+            let list_item_handle = list_item.clone();
 
-        let builder = gtk::Builder::from_string(GRID_CELL_UI);
-        let card: GtkBox = builder_object(&builder, "card");
-        list_item.set_child(Some(&card));
-    });
+            let builder = gtk::Builder::from_string(GRID_CELL_UI);
+            let card: GtkBox = builder_object(&builder, "card");
+
+            let popover = build_item_context_popover(&card);
+
+            let selection_handle = grid_selection_handle.clone();
+            let popover_handle = popover.clone();
+            let right_click = gtk::GestureClick::builder().button(3).build();
+            right_click.connect_pressed(move |gesture, _, x, y| {
+                let pos = list_item_handle.position();
+                if pos == gtk::INVALID_LIST_POSITION {
+                    return;
+                }
+                selection_handle.set_selected(pos);
+                popup_context_menu(&popover_handle, x, y);
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+            });
+            card.add_controller(right_click);
+
+            list_item.set_child(Some(&card));
+        });
+    }
 
     {
         let state_handle = state.clone();

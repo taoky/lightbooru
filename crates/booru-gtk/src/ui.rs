@@ -12,7 +12,7 @@ use adw::{
 };
 use booru_core::{Library, SearchQuery, SearchSort};
 use gtk::{
-    self, Button, Entry, GridView, Label, ListBox, Picture, ScrolledWindow, SearchEntry,
+    self, Button, Entry, GridView, Label, LinkButton, ListBox, Picture, ScrolledWindow, SearchEntry,
     SingleSelection, TextView,
 };
 
@@ -118,6 +118,8 @@ struct Ui {
     title: Label,
     author: Label,
     date: Label,
+    source_url: LinkButton,
+    open_file_button: Button,
     detail: Label,
     tags_wrap: WrapBox,
     tags_add_button: Button,

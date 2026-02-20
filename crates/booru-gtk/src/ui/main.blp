@@ -186,6 +186,29 @@ Adw.ApplicationWindow main_window {
                           xalign: 0.0;
                         }
 
+                        Box source_section {
+                          orientation: vertical;
+                          spacing: 4;
+
+                          Label source_url_title {
+                            label: "Source URL";
+                            xalign: 0.0;
+                            css-classes: ["dim-label"];
+                          }
+
+                          LinkButton source_url {
+                            uri: "about:blank";
+                            label: "(none)";
+                            halign: start;
+                            sensitive: false;
+                          }
+                        }
+
+                        Button open_file_button {
+                          label: "Open file";
+                          halign: start;
+                        }
+
                         Picture picture {
                           hexpand: true;
                           vexpand: true;

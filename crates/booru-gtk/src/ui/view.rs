@@ -1,9 +1,10 @@
 use std::cell::{Cell, RefCell};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use adw::prelude::*;
 use adw::{ActionRow, Toast};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use booru_core::{apply_update_to_image, BooruConfig, EditUpdate, Library};
 use gtk::{self, Box as GtkBox, Button, Label, Picture, TextView};
 
@@ -48,8 +49,8 @@ pub(super) fn rebuild_view(state: &Rc<RefCell<AppState>>, ui: &Ui) {
 }
 
 fn refresh_list(state: &Rc<RefCell<AppState>>, ui: &Ui) {
-    while let Some(child) = ui.list.first_child() {
-        ui.list.remove(&child);
+    while let Some(row) = ui.list.row_at_index(0) {
+        ui.list.remove(&row);
     }
 
     let (rows, selected_pos) = {
@@ -113,6 +114,20 @@ pub(super) fn refresh_grid(state: &Rc<RefCell<AppState>>, ui: &Ui) {
     ensure_selected_item_visible(ui, selected_pos);
 }
 
+struct DetailSnapshot {
+    position: usize,
+    image_path: PathBuf,
+    title: String,
+    author: String,
+    date: String,
+    source_url: Option<String>,
+    detail: String,
+    tags: Vec<String>,
+    notes: String,
+    sensitive: bool,
+    total_items: usize,
+}
+
 pub(super) fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
     let snapshot = {
         let state = state.borrow();
@@ -120,37 +135,51 @@ pub(super) fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
             return clear_detail(ui);
         };
         let item = &state.library.index.items[idx];
-        (
-            idx,
-            item.image_path.clone(),
-            infer_title(item),
-            item.merged_author().unwrap_or_else(|| "-".to_string()),
-            item.merged_date().unwrap_or_else(|| "-".to_string()),
-            item.merged_detail().unwrap_or_default(),
-            item.merged_tags(),
-            item.edits.notes.clone().unwrap_or_default(),
-            item.merged_sensitive(),
-            state.library.index.items.len(),
-        )
+        DetailSnapshot {
+            position: idx,
+            image_path: item.image_path.clone(),
+            title: infer_title(item),
+            author: item.merged_author().unwrap_or_else(|| "-".to_string()),
+            date: item.merged_date().unwrap_or_else(|| "-".to_string()),
+            source_url: item.platform_url(),
+            detail: item.merged_detail().unwrap_or_default(),
+            tags: item.merged_tags(),
+            notes: item.edits.notes.clone().unwrap_or_default(),
+            sensitive: item.merged_sensitive(),
+            total_items: state.library.index.items.len(),
+        }
     };
 
     ui.detail_stack.set_visible_child_name("detail");
     ui.edit_sheet.set_can_open(true);
-    ui.title.set_text(&snapshot.2);
-    ui.author.set_text(&format!("Author: {}", snapshot.3));
-    ui.date.set_text(&format!("Date: {}", snapshot.4));
-    ui.detail.set_text(&snapshot.5);
+    ui.title.set_text(&snapshot.title);
+    ui.author.set_text(&format!("Author: {}", snapshot.author));
+    ui.date.set_text(&format!("Date: {}", snapshot.date));
+    match snapshot.source_url.as_deref() {
+        Some(url) => {
+            ui.source_url.set_uri(url);
+            ui.source_url.set_label(url);
+            ui.source_url.set_sensitive(true);
+        }
+        None => {
+            ui.source_url.set_uri("about:blank");
+            ui.source_url.set_label("(none)");
+            ui.source_url.set_sensitive(false);
+        }
+    }
+    ui.open_file_button.set_sensitive(true);
+    ui.detail.set_text(&snapshot.detail);
     {
         let mut tag_values = ui.tag_values.borrow_mut();
-        *tag_values = snapshot.6.clone();
+        *tag_values = snapshot.tags.clone();
     }
     ui.tags_input.set_text("");
     rebuild_tag_wrap(ui);
-    set_notes_text(&ui.notes, &snapshot.7);
-    ui.item_sensitive.set_active(snapshot.8);
+    set_notes_text(&ui.notes, &snapshot.notes);
+    ui.item_sensitive.set_active(snapshot.sensitive);
     ui.picture.set_paintable(None::<&gtk::gdk::Texture>);
     hide_banner(ui);
-    set_status(ui, &format!("Loading image: {}", snapshot.1.display()));
+    set_status(ui, &format!("Loading image: {}", snapshot.image_path.display()));
 
     if let Some(previous_request_id) = ui.detail_pending_request_id.replace(None) {
         ui.image_loader.cancel_if_queued(previous_request_id);
@@ -160,8 +189,9 @@ pub(super) fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
     ui.detail_image_seq.set(load_seq);
 
     let ui_handle = ui.clone();
-    let image_path = snapshot.1.clone();
-    let total_items = snapshot.9;
+    let image_path = snapshot.image_path.clone();
+    let current_pos = snapshot.position + 1;
+    let total_items = snapshot.total_items;
     let pending_request_slot = ui.detail_pending_request_id.clone();
     let request_id = ui.image_loader.load(
         image_path.clone(),
@@ -184,7 +214,7 @@ pub(super) fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
                         &format!(
                             "Showing {} ({}/{})",
                             image_path.display(),
-                            snapshot.0 + 1,
+                            current_pos,
                             total_items
                         ),
                     );
@@ -217,6 +247,10 @@ fn clear_detail(ui: &Ui) {
     ui.title.set_text("(no match)");
     ui.author.set_text("");
     ui.date.set_text("");
+    ui.source_url.set_uri("about:blank");
+    ui.source_url.set_label("(none)");
+    ui.source_url.set_sensitive(false);
+    ui.open_file_button.set_sensitive(false);
     ui.detail.set_text("");
     ui.tag_values.borrow_mut().clear();
     ui.tags_input.set_text("");
@@ -225,6 +259,60 @@ fn clear_detail(ui: &Ui) {
     ui.item_sensitive.set_active(false);
     ui.picture.set_paintable(None::<&gtk::gdk::Texture>);
     set_status(ui, "No item selected.");
+}
+
+pub(super) fn open_selected_file(state: &Rc<RefCell<AppState>>, ui: &Ui) {
+    let Some(image_path) = ({
+        let state = state.borrow();
+        state
+            .selected_item_index()
+            .and_then(|idx| state.library.index.items.get(idx))
+            .map(|item| item.image_path.clone())
+    }) else {
+        set_status(ui, "No selected item.");
+        return;
+    };
+
+    let uri = gtk::gio::File::for_path(&image_path).uri();
+    match launch_uri(uri.as_str()) {
+        Ok(()) => {
+            set_status(ui, &format!("Opened file: {}", image_path.display()));
+            hide_banner(ui);
+        }
+        Err(err) => {
+            set_status(ui, &format!("failed to open file: {err}"));
+            show_banner(ui, &format!("Failed to open file: {err}"));
+        }
+    }
+}
+
+pub(super) fn open_selected_source_url(state: &Rc<RefCell<AppState>>, ui: &Ui) {
+    let Some(source_url) = ({
+        let state = state.borrow();
+        state
+            .selected_item_index()
+            .and_then(|idx| state.library.index.items.get(idx))
+            .and_then(|item| item.platform_url())
+    }) else {
+        set_status(ui, "No source URL for selected item.");
+        return;
+    };
+
+    match launch_uri(&source_url) {
+        Ok(()) => {
+            set_status(ui, &format!("Opened source URL: {source_url}"));
+            hide_banner(ui);
+        }
+        Err(err) => {
+            set_status(ui, &format!("failed to open source URL: {err}"));
+            show_banner(ui, &format!("Failed to open source URL: {err}"));
+        }
+    }
+}
+
+fn launch_uri(uri: &str) -> Result<()> {
+    gtk::gio::AppInfo::launch_default_for_uri(uri, None::<&gtk::gio::AppLaunchContext>)
+        .map_err(|err| anyhow!("cannot open `{uri}`: {err}"))
 }
 
 pub(super) fn save_selected_edits(state: &Rc<RefCell<AppState>>, ui: &Ui) -> Result<()> {
