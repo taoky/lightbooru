@@ -539,7 +539,7 @@ fn setup_grid_factory(
             debug!("Load {}", image_path.display());
             let request_id = image_loader_handle.load(
                 image_path,
-                Some((156, 156)),
+                Some((256, 256)),
                 ImageRequestKind::GridThumb,
                 move |finished_id, result| {
                     if pending_request_slot.get() == Some(finished_id) {
