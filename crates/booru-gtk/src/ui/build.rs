@@ -176,6 +176,14 @@ fn install_edit_sheet_open_gesture(edit_bar: &gtk::CenterBox, edit_sheet: &Botto
 
 fn connect_ui_signals(state: &Rc<RefCell<AppState>>, ui: &Ui, controls: &UiControls) {
     {
+        let split = controls.split.clone();
+        let grid = ui.grid.clone();
+        grid.set_single_click_activate(split.is_collapsed());
+        split.connect_collapsed_notify(move |split| {
+            grid.set_single_click_activate(split.is_collapsed());
+        });
+    }
+    {
         let ui = ui.clone();
         let tags_add_button = ui.tags_add_button.clone();
         tags_add_button.connect_clicked(move |_| {
@@ -217,6 +225,8 @@ fn connect_ui_signals(state: &Rc<RefCell<AppState>>, ui: &Ui, controls: &UiContr
             let mut state = state_handle.borrow_mut();
             state.query = entry.text().to_string();
             state.rebuild_filter();
+            // Keep search passive: typing should not implicitly select and open a detail item.
+            state.selected_pos = None;
             drop(state);
             rebuild_view(&state_handle, &ui);
         });
@@ -246,7 +256,6 @@ fn connect_ui_signals(state: &Rc<RefCell<AppState>>, ui: &Ui, controls: &UiContr
         controls.window.add_action(&show_sensitive_action);
     }
     {
-        let split = controls.split.clone();
         let state_handle = state.clone();
         let ui = ui.clone();
         let list_handle = ui.list.clone();
@@ -259,9 +268,6 @@ fn connect_ui_signals(state: &Rc<RefCell<AppState>>, ui: &Ui, controls: &UiContr
             drop(state);
             sync_browser_selection(&ui, selected_pos);
             refresh_detail(&state_handle, &ui);
-            if split.is_collapsed() {
-                split.set_show_content(selected_pos.is_some());
-            }
         });
     }
     {
@@ -274,7 +280,6 @@ fn connect_ui_signals(state: &Rc<RefCell<AppState>>, ui: &Ui, controls: &UiContr
         });
     }
     {
-        let split = controls.split.clone();
         let state_handle = state.clone();
         let ui = ui.clone();
         let grid_selection_handle = ui.grid_selection.clone();
@@ -295,9 +300,6 @@ fn connect_ui_signals(state: &Rc<RefCell<AppState>>, ui: &Ui, controls: &UiContr
 
             sync_browser_selection(&ui, selected_pos);
             refresh_detail(&state_handle, &ui);
-            if split.is_collapsed() {
-                split.set_show_content(selected_pos.is_some());
-            }
         });
     }
     {
