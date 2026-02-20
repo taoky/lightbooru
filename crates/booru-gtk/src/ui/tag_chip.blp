@@ -1,0 +1,20 @@
+using Gtk 4.0;
+
+Box chip {
+  orientation: horizontal;
+  spacing: 0;
+  hexpand: false;
+  css-classes: ["tag"];
+
+  Label chip_label {
+    xalign: 0.0;
+    ellipsize: end;
+    hexpand: true;
+  }
+
+  Button chip_remove_button {
+    icon-name: "window-close-symbolic";
+    tooltip-text: "Remove tag";
+    css-classes: ["flat", "circular"];
+  }
+}

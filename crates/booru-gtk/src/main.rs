@@ -11,9 +11,7 @@ use tracing_subscriber::EnvFilter;
 use adw::prelude::*;
 use adw::{
     ActionRow, Application, ApplicationWindow, Banner, BottomSheet, Breakpoint,
-    BreakpointCondition, Clamp, HeaderBar, NavigationPage,
-    NavigationSplitView, StatusPage, Toast, ToastOverlay, Toggle, ToggleGroup,
-    ToolbarView, ViewStack, WindowTitle, WrapBox,
+    BreakpointCondition, NavigationSplitView, Toast, ToastOverlay, ToggleGroup, ViewStack, WrapBox,
 };
 use anyhow::Result;
 use booru_core::{
@@ -21,11 +19,14 @@ use booru_core::{
 };
 use clap::Parser;
 use gtk::{
-    self, Align, Box as GtkBox, Button, Entry, GridView, Label, ListBox, Orientation, Picture,
-    ScrolledWindow, SearchEntry, SelectionMode, SignalListItemFactory, SingleSelection, TextView,
+    self, Box as GtkBox, Button, Entry, GridView, Label, ListBox, Picture, ScrolledWindow,
+    SearchEntry, SelectionMode, SignalListItemFactory, SingleSelection, TextView,
 };
 
 const APP_CSS: &str = include_str!("style.css");
+const APP_UI: &str = include_str!(concat!(env!("OUT_DIR"), "/main.ui"));
+const GRID_CELL_UI: &str = include_str!(concat!(env!("OUT_DIR"), "/grid_cell.ui"));
+const TAG_CHIP_UI: &str = include_str!(concat!(env!("OUT_DIR"), "/tag_chip.ui"));
 
 static APP_CSS_ONCE: Once = Once::new();
 
@@ -369,95 +370,60 @@ fn scan_library(config: &BooruConfig, quiet: bool) -> Result<Library> {
     Ok(library)
 }
 
+fn builder_object<T: gtk::prelude::IsA<gtk::glib::Object>>(builder: &gtk::Builder, id: &str) -> T {
+    builder
+        .object(id)
+        .unwrap_or_else(|| panic!("missing `{id}` in UI definition"))
+}
+
 fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
     install_tag_editor_css();
 
     let image_loader = Rc::new(ImageLoader::new());
 
-    let window = ApplicationWindow::builder()
-        .application(app)
-        .title("lightbooru")
-        .default_width(1280)
-        .default_height(960)
-        .width_request(600)
-        .height_request(900)
-        .build();
+    let builder = gtk::Builder::from_string(APP_UI);
 
-    let toast_overlay = ToastOverlay::new();
-    let toolbar = ToolbarView::new();
-    toast_overlay.set_child(Some(&toolbar));
-
-    let header = HeaderBar::new();
-    let window_title = WindowTitle::new("lightbooru", "gallery-dl local library");
-    header.set_title_widget(Some(&window_title));
-
-    let compact_back_button = Button::from_icon_name("go-previous-symbolic");
-    compact_back_button.add_css_class("flat");
-    compact_back_button.set_tooltip_text(Some("Back to library"));
-    compact_back_button.set_visible(false);
-    header.pack_start(&compact_back_button);
-
-    let search = SearchEntry::new();
-    search.set_placeholder_text(Some("Search tags/author/detail"));
-    let search_bar = gtk::SearchBar::new();
-    search_bar.set_show_close_button(true);
-    search_bar.set_search_mode(false);
-    search_bar.connect_entry(&search);
-    search_bar.set_key_capture_widget(Some(&window));
-    search_bar.set_child(Some(&search));
-
-    let search_button = gtk::ToggleButton::builder()
-        .icon_name("system-search-symbolic")
-        .build();
-    search_button.add_css_class("flat");
-    search_button.set_tooltip_text(Some("Search"));
-    header.pack_start(&search_button);
-
-    let browse_mode_group = ToggleGroup::new();
-    browse_mode_group.set_can_shrink(true);
-    browse_mode_group.set_homogeneous(true);
-    browse_mode_group.add(
-        Toggle::builder()
-            .name("list")
-            .icon_name("view-list-symbolic")
-            .tooltip("List mode")
-            .build(),
-    );
-    browse_mode_group.add(
-        Toggle::builder()
-            .name("grid")
-            .icon_name("view-grid-symbolic")
-            .tooltip("Thumbnail mode")
-            .build(),
-    );
-    browse_mode_group.set_active_name(Some(state.borrow().browser_mode.as_name()));
-    header.pack_start(&browse_mode_group);
+    let window: ApplicationWindow = builder_object(&builder, "main_window");
+    window.set_application(Some(app));
+    let toast_overlay: ToastOverlay = builder_object(&builder, "toast_overlay");
+    let compact_back_button: Button = builder_object(&builder, "compact_back_button");
+    let search: SearchEntry = builder_object(&builder, "search");
+    let search_bar: gtk::SearchBar = builder_object(&builder, "search_bar");
+    let search_button: gtk::ToggleButton = builder_object(&builder, "search_button");
+    let browse_mode_group: ToggleGroup = builder_object(&builder, "browse_mode_group");
+    let menu_button: gtk::MenuButton = builder_object(&builder, "menu_button");
+    let banner: Banner = builder_object(&builder, "banner");
+    let split: NavigationSplitView = builder_object(&builder, "split");
+    let list: ListBox = builder_object(&builder, "list");
+    let list_scroll: ScrolledWindow = builder_object(&builder, "list_scroll");
+    let grid: GridView = builder_object(&builder, "grid");
+    let browser_stack: ViewStack = builder_object(&builder, "browser_stack");
+    let picture: Picture = builder_object(&builder, "picture");
+    let title: Label = builder_object(&builder, "title");
+    let author: Label = builder_object(&builder, "author");
+    let date: Label = builder_object(&builder, "date");
+    let detail: Label = builder_object(&builder, "detail");
+    let tags_wrap: WrapBox = builder_object(&builder, "tags_wrap");
+    let tags_add_button: Button = builder_object(&builder, "tags_add_button");
+    let tags_input: Entry = builder_object(&builder, "tags_input");
+    let notes: TextView = builder_object(&builder, "notes");
+    let item_sensitive: gtk::Switch = builder_object(&builder, "item_sensitive");
+    let status: Label = builder_object(&builder, "status");
+    let detail_stack: ViewStack = builder_object(&builder, "detail_stack");
+    let edit_sheet: BottomSheet = builder_object(&builder, "edit_sheet");
+    let edit_bar: gtk::CenterBox = builder_object(&builder, "edit_bar");
+    let save_button: Button = builder_object(&builder, "save_button");
 
     let main_menu = gtk::gio::Menu::new();
     main_menu.append(Some("Show sensitive"), Some("win.show-sensitive"));
     main_menu.append(Some("Rescan library"), Some("win.rescan"));
-    let menu_button = gtk::MenuButton::builder()
-        .icon_name("open-menu-symbolic")
-        .menu_model(&main_menu)
-        .build();
-    menu_button.set_tooltip_text(Some("Main menu"));
-    header.pack_end(&menu_button);
-    toolbar.add_top_bar(&header);
-    toolbar.add_top_bar(&search_bar);
+    menu_button.set_menu_model(Some(&main_menu));
 
-    let content = GtkBox::new(Orientation::Vertical, 0);
-    content.set_vexpand(true);
-    let banner = Banner::new("");
-    banner.set_revealed(false);
-    content.append(&banner);
+    search_bar.connect_entry(&search);
+    search_bar.set_key_capture_widget(Some(&window));
+    browse_mode_group.set_active_name(Some(state.borrow().browser_mode.as_name()));
+    browser_stack.set_visible_child_name(state.borrow().browser_mode.as_name());
 
-    let split = NavigationSplitView::new();
-    split.set_hexpand(true);
-    split.set_vexpand(true);
-    split.set_min_sidebar_width(280.0);
-    split.set_max_sidebar_width(440.0);
-    split.set_sidebar_width_fraction(0.32);
-    split.set_show_content(true);
     install_split_breakpoint(&window, &split);
     sync_compact_back_button(&compact_back_button, &split);
     sync_compact_header_controls(&search_button, &browse_mode_group, &search_bar, &split);
@@ -489,14 +455,7 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
             sync_compact_header_controls(&search_button, &browse_mode_group, &search_bar, split);
         });
     }
-
-    let list = ListBox::new();
     list.set_selection_mode(SelectionMode::Single);
-    list.add_css_class("navigation-sidebar");
-    let list_scroll = ScrolledWindow::new();
-    list_scroll.set_child(Some(&list));
-    list_scroll.set_hexpand(true);
-    list_scroll.set_vexpand(true);
 
     let grid_store = gtk::gio::ListStore::new::<gtk::glib::BoxedAnyObject>();
     let grid_selection = SingleSelection::new(Some(grid_store.clone()));
@@ -509,27 +468,8 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
             return;
         };
 
-        let card = GtkBox::new(Orientation::Vertical, 6);
-        card.set_margin_start(6);
-        card.set_margin_end(6);
-        card.set_margin_top(6);
-        card.set_margin_bottom(6);
-
-        let thumb = Picture::new();
-        thumb.set_content_fit(gtk::ContentFit::Cover);
-        thumb.set_size_request(156, 156);
-        thumb.set_can_shrink(true);
-        thumb.set_halign(Align::Fill);
-
-        let caption = Label::new(None);
-        caption.set_wrap(false);
-        caption.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        caption.set_max_width_chars(20);
-        caption.set_xalign(0.0);
-        caption.add_css_class("caption");
-
-        card.append(&thumb);
-        card.append(&caption);
+        let builder = gtk::Builder::from_string(GRID_CELL_UI);
+        let card: GtkBox = builder_object(&builder, "card");
         list_item.set_child(Some(&card));
     });
 
@@ -656,186 +596,11 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
         });
     }
 
-    let grid = GridView::new(Some(grid_selection.clone()), Some(grid_factory));
+    grid.set_model(Some(&grid_selection));
+    grid.set_factory(Some(&grid_factory));
     grid.set_single_click_activate(false);
     grid.set_max_columns(4);
     grid.set_min_columns(2);
-    grid.add_css_class("navigation-sidebar");
-    let grid_scroll = ScrolledWindow::new();
-    grid_scroll.set_child(Some(&grid));
-    grid_scroll.set_hexpand(true);
-    grid_scroll.set_vexpand(true);
-
-    let browser_stack = ViewStack::new();
-    browser_stack.set_hhomogeneous(false);
-    browser_stack.set_vhomogeneous(false);
-    browser_stack.add_titled(&list_scroll, Some("list"), "List");
-    browser_stack.add_titled(&grid_scroll, Some("grid"), "Grid");
-    browser_stack.set_visible_child_name(state.borrow().browser_mode.as_name());
-
-    let sidebar_page = NavigationPage::new(&browser_stack, "Library");
-    split.set_sidebar(Some(&sidebar_page));
-
-    let detail_content_wrap = GtkBox::new(Orientation::Vertical, 12);
-    detail_content_wrap.set_margin_start(12);
-    detail_content_wrap.set_margin_end(12);
-    detail_content_wrap.set_margin_top(12);
-    detail_content_wrap.set_margin_bottom(72);
-
-    let title = Label::new(None);
-    title.set_xalign(0.0);
-    title.set_wrap(true);
-    title.add_css_class("title-2");
-
-    let author = Label::new(None);
-    author.set_xalign(0.0);
-
-    let date = Label::new(None);
-    date.set_xalign(0.0);
-
-    let picture = Picture::new();
-    picture.set_hexpand(true);
-    picture.set_vexpand(true);
-    picture.set_can_shrink(true);
-    picture.set_halign(Align::Fill);
-    picture.set_valign(Align::Fill);
-    picture.set_content_fit(gtk::ContentFit::Contain);
-
-    let detail = Label::new(None);
-    detail.set_xalign(0.0);
-    detail.set_wrap(true);
-    detail.set_selectable(true);
-
-    let tags_wrap = WrapBox::new();
-    tags_wrap.set_line_spacing(6);
-    tags_wrap.set_child_spacing(6);
-
-    let tags_add_button = Button::from_icon_name("list-add-symbolic");
-    tags_add_button.add_css_class("flat");
-    tags_add_button.add_css_class("circular");
-    tags_add_button.set_tooltip_text(Some("Add tags from input"));
-
-    let tags_input = Entry::new();
-    tags_input.set_placeholder_text(Some("Type tags, press Enter or +"));
-    tags_input.set_hexpand(true);
-
-    let tags_editor = GtkBox::new(Orientation::Vertical, 6);
-    let tags_title = Label::new(Some("Tags"));
-    tags_title.set_xalign(0.0);
-    tags_editor.append(&tags_title);
-    tags_editor.append(&tags_wrap);
-    tags_editor.append(&tags_input);
-
-    let notes = TextView::new();
-    notes.set_wrap_mode(gtk::WrapMode::WordChar);
-    notes.set_vexpand(false);
-    notes.set_hexpand(true);
-    notes.set_top_margin(8);
-    notes.set_bottom_margin(8);
-    notes.set_left_margin(12);
-    notes.set_right_margin(12);
-    notes.set_accepts_tab(false);
-
-    let notes_scroll = ScrolledWindow::new();
-    notes_scroll.set_min_content_height(132);
-    notes_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    notes_scroll.set_has_frame(false);
-    notes_scroll.add_css_class("notes-editor");
-    notes_scroll.set_child(Some(&notes));
-    notes_scroll.set_hexpand(true);
-
-    let notes_editor = GtkBox::new(Orientation::Vertical, 6);
-    let notes_title = Label::new(Some("Notes"));
-    notes_title.set_xalign(0.0);
-    notes_editor.append(&notes_title);
-    notes_editor.append(&notes_scroll);
-
-    let item_sensitive = gtk::Switch::new();
-    item_sensitive.set_halign(Align::End);
-
-    let sensitive_row = GtkBox::new(Orientation::Horizontal, 12);
-    sensitive_row.add_css_class("edit-sensitive-row");
-    let sensitive_title = Label::new(Some("Sensitive"));
-    sensitive_title.set_xalign(0.0);
-    sensitive_title.set_hexpand(true);
-    sensitive_row.append(&sensitive_title);
-    sensitive_row.append(&item_sensitive);
-
-    tags_editor.add_css_class("edit-field");
-    notes_editor.add_css_class("edit-field");
-
-    let edits_panel = GtkBox::new(Orientation::Vertical, 12);
-    edits_panel.add_css_class("edit-panel");
-    edits_panel.append(&tags_editor);
-    edits_panel.append(&gtk::Separator::new(Orientation::Horizontal));
-    edits_panel.append(&notes_editor);
-    edits_panel.append(&gtk::Separator::new(Orientation::Horizontal));
-    edits_panel.append(&sensitive_row);
-
-    let edits_header = GtkBox::new(Orientation::Vertical, 2);
-    let edits_title = Label::new(Some("Edits"));
-    edits_title.set_xalign(0.0);
-    edits_title.add_css_class("heading");
-    let edits_desc = Label::new(Some("Saved to *.booru.json"));
-    edits_desc.set_xalign(0.0);
-    edits_desc.add_css_class("dim-label");
-    edits_header.append(&edits_title);
-    edits_header.append(&edits_desc);
-
-    let edits_section = GtkBox::new(Orientation::Vertical, 8);
-    edits_section.add_css_class("edit-section");
-    edits_section.append(&edits_header);
-    edits_section.append(&edits_panel);
-
-    let save_button = Button::with_label("Save");
-    save_button.set_halign(Align::End);
-    save_button.add_css_class("suggested-action");
-
-    let sheet_wrap = GtkBox::new(Orientation::Vertical, 12);
-    sheet_wrap.set_margin_start(12);
-    sheet_wrap.set_margin_end(12);
-    sheet_wrap.set_margin_top(12);
-    sheet_wrap.set_margin_bottom(12);
-    sheet_wrap.append(&edits_section);
-    sheet_wrap.append(&save_button);
-
-    let sheet_scroll = ScrolledWindow::new();
-    sheet_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    sheet_scroll.set_min_content_height(460);
-    sheet_scroll.set_max_content_height(720);
-    sheet_scroll.set_propagate_natural_height(true);
-    sheet_scroll.set_child(Some(&sheet_wrap));
-    sheet_scroll.set_hexpand(true);
-    sheet_scroll.set_vexpand(true);
-
-    detail_content_wrap.append(&title);
-    detail_content_wrap.append(&author);
-    detail_content_wrap.append(&date);
-    detail_content_wrap.append(&picture);
-    detail_content_wrap.append(&detail);
-
-    let detail_scroll = ScrolledWindow::new();
-    let detail_clamp = Clamp::new();
-    detail_clamp.set_maximum_size(960);
-    detail_clamp.set_tightening_threshold(560);
-    detail_clamp.set_child(Some(&detail_content_wrap));
-    detail_scroll.set_child(Some(&detail_clamp));
-    detail_scroll.set_hexpand(true);
-    detail_scroll.set_vexpand(true);
-
-    let edit_bar = gtk::CenterBox::new();
-    edit_bar.add_css_class("toolbar");
-    edit_bar.set_height_request(46);
-    let edit_bar_label = Label::new(Some("Edit Metadata"));
-    edit_bar.set_center_widget(Some(&edit_bar_label));
-
-    let edit_sheet = BottomSheet::new();
-    edit_sheet.set_content(Some(&detail_scroll));
-    edit_sheet.set_sheet(Some(&sheet_scroll));
-    edit_sheet.set_bottom_bar(Some(&edit_bar));
-    edit_sheet.set_show_drag_handle(true);
-    edit_sheet.set_modal(false);
-    edit_sheet.set_can_open(false);
     {
         let edit_sheet = edit_sheet.clone();
         let bar_click = gtk::GestureClick::new();
@@ -846,33 +611,6 @@ fn build_ui(app: &Application, state: Rc<RefCell<AppState>>) {
         });
         edit_bar.add_controller(bar_click);
     }
-
-    let empty_page = StatusPage::new();
-    empty_page.set_icon_name(Some("image-x-generic-symbolic"));
-    empty_page.set_title("No item selected");
-    empty_page.set_description(Some(
-        "Select an item from the left panel to preview and edit metadata.",
-    ));
-
-    let detail_stack = ViewStack::new();
-    detail_stack.set_hhomogeneous(false);
-    detail_stack.set_vhomogeneous(false);
-    detail_stack.add_titled(&edit_sheet, Some("detail"), "Detail");
-    detail_stack.add_titled(&empty_page, Some("empty"), "Empty");
-    detail_stack.set_visible_child_name("empty");
-
-    let detail_page = NavigationPage::new(&detail_stack, "Details");
-    split.set_content(Some(&detail_page));
-
-    let status = Label::new(None);
-    status.set_xalign(0.0);
-    status.set_wrap(true);
-    status.add_css_class("dim-label");
-    detail_content_wrap.append(&status);
-
-    content.append(&split);
-    toolbar.set_content(Some(&content));
-    window.set_content(Some(&toast_overlay));
 
     let ui = Ui {
         list,
@@ -1494,22 +1232,11 @@ fn rebuild_tag_wrap(ui: &Ui) {
 }
 
 fn build_tag_chip(ui: &Ui, index: usize, tag: &str) -> GtkBox {
-    let chip = GtkBox::new(Orientation::Horizontal, 0);
-    chip.set_hexpand(false);
-    chip.add_css_class("tag");
-
-    let label = Label::new(Some(tag));
-    label.set_xalign(0.0);
-    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    label.set_hexpand(true);
-
-    let remove_button = Button::from_icon_name("window-close-symbolic");
-    remove_button.add_css_class("flat");
-    remove_button.add_css_class("circular");
-    remove_button.set_tooltip_text(Some("Remove tag"));
-
-    chip.append(&label);
-    chip.append(&remove_button);
+    let builder = gtk::Builder::from_string(TAG_CHIP_UI);
+    let chip: GtkBox = builder_object(&builder, "chip");
+    let label: Label = builder_object(&builder, "chip_label");
+    let remove_button: Button = builder_object(&builder, "chip_remove_button");
+    label.set_label(tag);
 
     let ui_handle = ui.clone();
     remove_button.connect_clicked(move |_| {

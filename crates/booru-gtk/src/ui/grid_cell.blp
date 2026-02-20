@@ -1,0 +1,26 @@
+using Gtk 4.0;
+
+Box card {
+  orientation: vertical;
+  spacing: 6;
+  margin-start: 6;
+  margin-end: 6;
+  margin-top: 6;
+  margin-bottom: 6;
+
+  Picture thumb {
+    content-fit: cover;
+    width-request: 156;
+    height-request: 156;
+    can-shrink: true;
+    halign: fill;
+  }
+
+  Label caption {
+    wrap: false;
+    ellipsize: end;
+    max-width-chars: 20;
+    xalign: 0.0;
+    css-classes: ["caption"];
+  }
+}

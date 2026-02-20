@@ -1,0 +1,364 @@
+using Gtk 4.0;
+using Adw 1;
+
+Adw.ApplicationWindow main_window {
+  title: "lightbooru";
+  default-width: 1280;
+  default-height: 960;
+  width-request: 600;
+  height-request: 900;
+
+  content: Adw.ToastOverlay toast_overlay {
+    child: Adw.ToolbarView toolbar {
+      [top]
+      Adw.HeaderBar header {
+        title-widget: Adw.WindowTitle window_title {
+          title: "lightbooru";
+          subtitle: "gallery-dl local library";
+        };
+
+        [start]
+        Button compact_back_button {
+          icon-name: "go-previous-symbolic";
+          tooltip-text: "Back to library";
+          visible: false;
+          css-classes: ["flat"];
+        }
+
+        [start]
+        ToggleButton search_button {
+          icon-name: "system-search-symbolic";
+          tooltip-text: "Search";
+          css-classes: ["flat"];
+        }
+
+        [start]
+        Adw.ToggleGroup browse_mode_group {
+          can-shrink: true;
+          homogeneous: true;
+
+          Adw.Toggle list_toggle {
+            name: "list";
+            icon-name: "view-list-symbolic";
+            tooltip: "List mode";
+          }
+
+          Adw.Toggle grid_toggle {
+            name: "grid";
+            icon-name: "view-grid-symbolic";
+            tooltip: "Thumbnail mode";
+          }
+        }
+
+        [end]
+        MenuButton menu_button {
+          icon-name: "open-menu-symbolic";
+          tooltip-text: "Main menu";
+        }
+      }
+
+      [top]
+      SearchBar search_bar {
+        show-close-button: true;
+        search-mode-enabled: false;
+        key-capture-widget: main_window;
+
+        child: SearchEntry search {
+          placeholder-text: "Search tags/author/detail";
+        };
+      }
+
+      content: Box content {
+        orientation: vertical;
+        spacing: 0;
+        vexpand: true;
+
+        Adw.Banner banner {
+          title: "";
+          revealed: false;
+        }
+
+        Adw.NavigationSplitView split {
+          hexpand: true;
+          vexpand: true;
+          min-sidebar-width: 280;
+          max-sidebar-width: 440;
+          sidebar-width-fraction: 0.32;
+          show-content: true;
+
+          sidebar: Adw.NavigationPage sidebar_page {
+            title: "Library";
+
+            child: Adw.ViewStack browser_stack {
+              hhomogeneous: false;
+              vhomogeneous: false;
+
+              Adw.ViewStackPage {
+                name: "list";
+                title: "List";
+
+                child: ScrolledWindow list_scroll {
+                  hexpand: true;
+                  vexpand: true;
+
+                  child: ListBox list {
+                    selection-mode: single;
+                    css-classes: ["navigation-sidebar"];
+                  };
+                };
+              }
+
+              Adw.ViewStackPage {
+                name: "grid";
+                title: "Grid";
+
+                child: ScrolledWindow grid_scroll {
+                  hexpand: true;
+                  vexpand: true;
+
+                  child: GridView grid {
+                    single-click-activate: false;
+                    max-columns: 4;
+                    min-columns: 2;
+                    css-classes: ["navigation-sidebar"];
+                  };
+                };
+              }
+            };
+          };
+
+          content: Adw.NavigationPage detail_page {
+            title: "Details";
+
+            child: Adw.ViewStack detail_stack {
+              hhomogeneous: false;
+              vhomogeneous: false;
+              visible-child-name: "empty";
+
+              Adw.ViewStackPage {
+                name: "detail";
+                title: "Detail";
+
+                child: Adw.BottomSheet edit_sheet {
+                  can-open: false;
+                  modal: false;
+                  show-drag-handle: true;
+
+                  content: ScrolledWindow detail_scroll {
+                    hexpand: true;
+                    vexpand: true;
+
+                    child: Adw.Clamp detail_clamp {
+                      maximum-size: 960;
+                      tightening-threshold: 560;
+
+                      child: Box detail_content_wrap {
+                        orientation: vertical;
+                        spacing: 12;
+                        margin-start: 12;
+                        margin-end: 12;
+                        margin-top: 12;
+                        margin-bottom: 72;
+
+                        Label title {
+                          xalign: 0.0;
+                          wrap: true;
+                          css-classes: ["title-2"];
+                        }
+
+                        Label author {
+                          xalign: 0.0;
+                        }
+
+                        Label date {
+                          xalign: 0.0;
+                        }
+
+                        Picture picture {
+                          hexpand: true;
+                          vexpand: true;
+                          can-shrink: true;
+                          halign: fill;
+                          valign: fill;
+                          content-fit: contain;
+                        }
+
+                        Label detail {
+                          xalign: 0.0;
+                          wrap: true;
+                          selectable: true;
+                        }
+
+                        Label status {
+                          xalign: 0.0;
+                          wrap: true;
+                          css-classes: ["dim-label"];
+                        }
+                      };
+                    };
+                  };
+
+                  sheet: ScrolledWindow sheet_scroll {
+                    hexpand: true;
+                    vexpand: true;
+                    min-content-height: 460;
+                    max-content-height: 720;
+                    propagate-natural-height: true;
+                    hscrollbar-policy: never;
+                    vscrollbar-policy: automatic;
+
+                    child: Box sheet_wrap {
+                      orientation: vertical;
+                      spacing: 12;
+                      margin-start: 12;
+                      margin-end: 12;
+                      margin-top: 12;
+                      margin-bottom: 12;
+
+                      Box edits_section {
+                        orientation: vertical;
+                        spacing: 8;
+                        css-classes: ["edit-section"];
+
+                        Box edits_header {
+                          orientation: vertical;
+                          spacing: 2;
+
+                          Label edits_title {
+                            label: "Edits";
+                            xalign: 0.0;
+                            css-classes: ["heading"];
+                          }
+
+                          Label edits_desc {
+                            label: "Saved to *.booru.json";
+                            xalign: 0.0;
+                            css-classes: ["dim-label"];
+                          }
+                        }
+
+                        Box edits_panel {
+                          orientation: vertical;
+                          spacing: 12;
+                          css-classes: ["edit-panel"];
+
+                          Box tags_editor {
+                            orientation: vertical;
+                            spacing: 6;
+                            css-classes: ["edit-field"];
+
+                            Label tags_title {
+                              label: "Tags";
+                              xalign: 0.0;
+                            }
+
+                            Adw.WrapBox tags_wrap {
+                              line-spacing: 6;
+                              child-spacing: 6;
+                            }
+
+                            Entry tags_input {
+                              hexpand: true;
+                              placeholder-text: "Type tags, press Enter or +";
+                            }
+                          }
+
+                          Separator {
+                            orientation: horizontal;
+                          }
+
+                          Box notes_editor {
+                            orientation: vertical;
+                            spacing: 6;
+                            css-classes: ["edit-field"];
+
+                            Label notes_title {
+                              label: "Notes";
+                              xalign: 0.0;
+                            }
+
+                            ScrolledWindow notes_scroll {
+                              min-content-height: 132;
+                              has-frame: false;
+                              hscrollbar-policy: never;
+                              vscrollbar-policy: automatic;
+                              hexpand: true;
+                              css-classes: ["notes-editor"];
+
+                              child: TextView notes {
+                                wrap-mode: word_char;
+                                vexpand: false;
+                                hexpand: true;
+                                top-margin: 8;
+                                bottom-margin: 8;
+                                left-margin: 12;
+                                right-margin: 12;
+                                accepts-tab: false;
+                              };
+                            }
+                          }
+
+                          Separator {
+                            orientation: horizontal;
+                          }
+
+                          Box sensitive_row {
+                            orientation: horizontal;
+                            spacing: 12;
+                            css-classes: ["edit-sensitive-row"];
+
+                            Label sensitive_title {
+                              label: "Sensitive";
+                              xalign: 0.0;
+                              hexpand: true;
+                            }
+
+                            Switch item_sensitive {
+                              halign: end;
+                            }
+                          }
+                        }
+                      }
+
+                      Button save_button {
+                        label: "Save";
+                        halign: end;
+                        css-classes: ["suggested-action"];
+                      }
+                    };
+                  };
+
+                  bottom-bar: CenterBox edit_bar {
+                    height-request: 46;
+                    css-classes: ["toolbar"];
+
+                    center-widget: Label edit_bar_label {
+                      label: "Edit Metadata";
+                    };
+                  };
+                };
+              }
+
+              Adw.ViewStackPage {
+                name: "empty";
+                title: "Empty";
+
+                child: Adw.StatusPage empty_page {
+                  icon-name: "image-x-generic-symbolic";
+                  title: "No item selected";
+                  description: "Select an item from the left panel to preview and edit metadata.";
+                };
+              }
+            };
+          };
+        }
+      };
+    };
+  };
+}
+
+Button tags_add_button {
+  icon-name: "list-add-symbolic";
+  tooltip-text: "Add tags from input";
+  css-classes: ["flat", "circular"];
+}
