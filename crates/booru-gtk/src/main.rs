@@ -45,7 +45,7 @@ fn main() -> Result<()> {
     )));
 
     let app = Application::builder()
-        .application_id("dev.lightbooru.gtk")
+        .application_id("moe.taoky.lightbooru.gtk")
         .build();
     let state_for_activate = state.clone();
     app.connect_activate(move |app| ui::build_ui(app, state_for_activate.clone()));
