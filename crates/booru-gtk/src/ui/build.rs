@@ -176,6 +176,22 @@ fn install_edit_sheet_open_gesture(edit_bar: &gtk::CenterBox, edit_sheet: &Botto
 
 fn connect_ui_signals(state: &Rc<RefCell<AppState>>, ui: &Ui, controls: &UiControls) {
     {
+        let search_bar = controls.search_bar.clone();
+        let search = controls.search.clone();
+        let key_controller = gtk::EventControllerKey::new();
+        key_controller.connect_key_pressed(move |_, key, _, modifiers| {
+            let is_ctrl_f = modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK)
+                && matches!(key, gtk::gdk::Key::f | gtk::gdk::Key::F);
+            if is_ctrl_f {
+                search_bar.set_search_mode(true);
+                search.grab_focus();
+                return gtk::glib::Propagation::Stop;
+            }
+            gtk::glib::Propagation::Proceed
+        });
+        controls.window.add_controller(key_controller);
+    }
+    {
         let split = controls.split.clone();
         let grid = ui.grid.clone();
         grid.set_single_click_activate(split.is_collapsed());
