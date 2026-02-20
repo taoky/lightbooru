@@ -13,7 +13,7 @@ use super::image_loader::{ImageLoader, ImageRequestKind};
 use super::view::{
     append_pending_tags_input, ensure_selected_item_visible, grid_cell_widgets,
     infer_thumbnail_title, install_tag_editor_css, rebuild_tag_wrap, rebuild_view, refresh_detail,
-    refresh_grid, rescan_library, save_selected_edits, set_status, show_banner, show_toast,
+    refresh_grid, rescan_library, save_selected_edits, show_error_dialog, show_toast,
     sync_browser_selection, open_selected_file, open_selected_source_url,
 };
 use super::*;
@@ -54,7 +54,6 @@ impl Ui {
         let tags_input: Entry = builder_object(builder, "tags_input");
         let notes: TextView = builder_object(builder, "notes");
         let item_sensitive: gtk::Switch = builder_object(builder, "item_sensitive");
-        let status: Label = builder_object(builder, "status");
         let detail_stack: ViewStack = builder_object(builder, "detail_stack");
         let edit_sheet: BottomSheet = builder_object(builder, "edit_sheet");
         let edit_bar: gtk::CenterBox = builder_object(builder, "edit_bar");
@@ -64,6 +63,7 @@ impl Ui {
         let (grid_store, grid_selection) = setup_grid_factory(state, &grid, image_loader.clone());
 
         let ui = Self {
+            window: window.clone(),
             list,
             list_scroll,
             grid,
@@ -83,7 +83,6 @@ impl Ui {
             tag_values: Rc::new(RefCell::new(Vec::new())),
             notes,
             item_sensitive,
-            status,
             detail_stack,
             edit_sheet,
             toast_overlay,
@@ -411,8 +410,7 @@ fn connect_ui_signals(state: &Rc<RefCell<AppState>>, ui: &Ui, controls: &UiContr
         let ui = ui.clone();
         controls.save_button.connect_clicked(move |_| {
             if let Err(err) = save_selected_edits(&state_handle, &ui) {
-                set_status(&ui, &format!("failed to save: {err}"));
-                show_banner(&ui, &format!("Failed to save edits: {err}"));
+                show_error_dialog(&ui, "Failed to save edits", &format!("{err}"));
             }
         });
     }
@@ -422,8 +420,7 @@ fn connect_ui_signals(state: &Rc<RefCell<AppState>>, ui: &Ui, controls: &UiContr
         let rescan_action = gtk::gio::SimpleAction::new("rescan", None);
         rescan_action.connect_activate(move |_, _| {
             if let Err(err) = rescan_library(&state_handle, &ui) {
-                set_status(&ui, &format!("failed to rescan: {err}"));
-                show_banner(&ui, &format!("Failed to rescan library: {err}"));
+                show_error_dialog(&ui, "Failed to rescan library", &format!("{err}"));
             }
         });
         controls.window.add_action(&rescan_action);

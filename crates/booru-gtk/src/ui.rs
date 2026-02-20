@@ -108,6 +108,7 @@ impl AppState {
 
 #[derive(Clone)]
 struct Ui {
+    window: ApplicationWindow,
     list: ListBox,
     list_scroll: ScrolledWindow,
     grid: GridView,
@@ -127,7 +128,6 @@ struct Ui {
     tag_values: Rc<RefCell<Vec<String>>>,
     notes: TextView,
     item_sensitive: gtk::Switch,
-    status: Label,
     detail_stack: ViewStack,
     edit_sheet: BottomSheet,
     toast_overlay: ToastOverlay,

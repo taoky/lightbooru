@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use adw::{ActionRow, Toast};
+use adw::{ActionRow, AlertDialog, Toast};
 use anyhow::{anyhow, Result};
 use booru_core::{apply_update_to_image, BooruConfig, EditUpdate, Library};
 use gtk::{self, Box as GtkBox, Button, Label, Picture, TextView};
@@ -115,7 +115,6 @@ pub(super) fn refresh_grid(state: &Rc<RefCell<AppState>>, ui: &Ui) {
 }
 
 struct DetailSnapshot {
-    position: usize,
     image_path: PathBuf,
     title: String,
     author: String,
@@ -125,7 +124,6 @@ struct DetailSnapshot {
     tags: Vec<String>,
     notes: String,
     sensitive: bool,
-    total_items: usize,
 }
 
 pub(super) fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
@@ -136,7 +134,6 @@ pub(super) fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
         };
         let item = &state.library.index.items[idx];
         DetailSnapshot {
-            position: idx,
             image_path: item.image_path.clone(),
             title: infer_title(item),
             author: item.merged_author().unwrap_or_else(|| "-".to_string()),
@@ -146,7 +143,6 @@ pub(super) fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
             tags: item.merged_tags(),
             notes: item.edits.notes.clone().unwrap_or_default(),
             sensitive: item.merged_sensitive(),
-            total_items: state.library.index.items.len(),
         }
     };
 
@@ -179,7 +175,6 @@ pub(super) fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
     ui.item_sensitive.set_active(snapshot.sensitive);
     ui.picture.set_paintable(None::<&gtk::gdk::Texture>);
     hide_banner(ui);
-    set_status(ui, &format!("Loading image: {}", snapshot.image_path.display()));
 
     if let Some(previous_request_id) = ui.detail_pending_request_id.replace(None) {
         ui.image_loader.cancel_if_queued(previous_request_id);
@@ -190,8 +185,6 @@ pub(super) fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
 
     let ui_handle = ui.clone();
     let image_path = snapshot.image_path.clone();
-    let current_pos = snapshot.position + 1;
-    let total_items = snapshot.total_items;
     let pending_request_slot = ui.detail_pending_request_id.clone();
     let request_id = ui.image_loader.load(
         image_path.clone(),
@@ -209,22 +202,14 @@ pub(super) fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
             match result {
                 Ok(texture) => {
                     ui_handle.picture.set_paintable(Some(&texture));
-                    set_status(
-                        &ui_handle,
-                        &format!(
-                            "Showing {} ({}/{})",
-                            image_path.display(),
-                            current_pos,
-                            total_items
-                        ),
-                    );
                 }
                 Err(err) => {
                     ui_handle.picture.set_paintable(None::<&gtk::gdk::Texture>);
-                    set_status(
+                    show_error_dialog(
                         &ui_handle,
+                        "Image preview unavailable",
                         &format!(
-                            "image preview unavailable: {} ({err})",
+                            "{} ({err})",
                             image_path.display()
                         ),
                     );
@@ -258,7 +243,6 @@ fn clear_detail(ui: &Ui) {
     set_notes_text(&ui.notes, "");
     ui.item_sensitive.set_active(false);
     ui.picture.set_paintable(None::<&gtk::gdk::Texture>);
-    set_status(ui, "No item selected.");
 }
 
 pub(super) fn open_selected_file(state: &Rc<RefCell<AppState>>, ui: &Ui) {
@@ -269,19 +253,17 @@ pub(super) fn open_selected_file(state: &Rc<RefCell<AppState>>, ui: &Ui) {
             .and_then(|idx| state.library.index.items.get(idx))
             .map(|item| item.image_path.clone())
     }) else {
-        set_status(ui, "No selected item.");
+        show_error_dialog(ui, "Open file failed", "No selected item.");
         return;
     };
 
     let uri = gtk::gio::File::for_path(&image_path).uri();
     match launch_uri(uri.as_str()) {
         Ok(()) => {
-            set_status(ui, &format!("Opened file: {}", image_path.display()));
             hide_banner(ui);
         }
         Err(err) => {
-            set_status(ui, &format!("failed to open file: {err}"));
-            show_banner(ui, &format!("Failed to open file: {err}"));
+            show_error_dialog(ui, "Failed to open file", &format!("{err}"));
         }
     }
 }
@@ -294,18 +276,20 @@ pub(super) fn open_selected_source_url(state: &Rc<RefCell<AppState>>, ui: &Ui) {
             .and_then(|idx| state.library.index.items.get(idx))
             .and_then(|item| item.platform_url())
     }) else {
-        set_status(ui, "No source URL for selected item.");
+        show_error_dialog(
+            ui,
+            "Open source URL failed",
+            "No source URL for selected item.",
+        );
         return;
     };
 
     match launch_uri(&source_url) {
         Ok(()) => {
-            set_status(ui, &format!("Opened source URL: {source_url}"));
             hide_banner(ui);
         }
         Err(err) => {
-            set_status(ui, &format!("failed to open source URL: {err}"));
-            show_banner(ui, &format!("Failed to open source URL: {err}"));
+            show_error_dialog(ui, "Failed to open source URL", &format!("{err}"));
         }
     }
 }
@@ -319,7 +303,7 @@ pub(super) fn save_selected_edits(state: &Rc<RefCell<AppState>>, ui: &Ui) -> Res
     let (item_idx, image_path) = {
         let state = state.borrow();
         let Some(item_idx) = state.selected_item_index() else {
-            set_status(ui, "No selected item.");
+            show_error_dialog(ui, "Save failed", "No selected item.");
             return Ok(());
         };
         (
@@ -353,7 +337,6 @@ pub(super) fn save_selected_edits(state: &Rc<RefCell<AppState>>, ui: &Ui) -> Res
     }
 
     rebuild_view(state, ui);
-    set_status(ui, &format!("Saved edits: {}", image_path.display()));
     show_toast(ui, "Edits saved");
     hide_banner(ui);
     Ok(())
@@ -371,7 +354,6 @@ pub(super) fn rescan_library(state: &Rc<RefCell<AppState>>, ui: &Ui) -> Result<(
         state.rebuild_filter();
     }
     rebuild_view(state, ui);
-    set_status(ui, "Rescan complete.");
     show_toast(ui, "Rescan complete");
     hide_banner(ui);
     Ok(())
@@ -543,19 +525,18 @@ pub(super) fn ensure_selected_item_visible(ui: &Ui, selected_pos: Option<usize>)
     }
 }
 
-pub(super) fn set_status(ui: &Ui, message: &str) {
-    ui.status.set_text(message);
-}
-
 pub(super) fn show_toast(ui: &Ui, message: &str) {
     let toast = Toast::new(message);
     toast.set_timeout(2);
     ui.toast_overlay.add_toast(toast);
 }
 
-pub(super) fn show_banner(ui: &Ui, message: &str) {
-    ui.banner.set_title(message);
-    ui.banner.set_revealed(true);
+pub(super) fn show_error_dialog(ui: &Ui, heading: &str, message: &str) {
+    let dialog = AlertDialog::new(Some(heading), Some(message));
+    dialog.add_response("ok", "OK");
+    dialog.set_default_response(Some("ok"));
+    dialog.set_close_response("ok");
+    dialog.present(Some(&ui.window));
 }
 
 pub(super) fn hide_banner(ui: &Ui) {
