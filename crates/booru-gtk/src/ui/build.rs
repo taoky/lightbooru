@@ -214,12 +214,55 @@ fn selected_text_from_label(label: &Label) -> Option<String> {
     (!selected.is_empty()).then_some(selected)
 }
 
+fn install_label_selection_menu_and_actions(
+    window: &ApplicationWindow,
+    state: &Rc<RefCell<AppState>>,
+    ui: &Ui,
+    search: &SearchEntry,
+    search_bar: &gtk::SearchBar,
+    suppress_search_changed: &Rc<Cell<bool>>,
+    label: &Label,
+    search_action_name: &str,
+    clear_action_name: &str,
+) {
+    let search_action = gtk::gio::SimpleAction::new(search_action_name, None);
+    {
+        let state_handle = state.clone();
+        let ui = ui.clone();
+        let search = search.clone();
+        let search_bar = search_bar.clone();
+        let suppress = suppress_search_changed.clone();
+        let label = label.clone();
+        search_action.connect_activate(move |_, _| {
+            let Some(query) = selected_text_from_label(&label) else {
+                show_toast(&ui, "No selected text");
+                return;
+            };
+
+            suppress.set(true);
+            search.set_text(&query);
+            suppress.set(false);
+            search_bar.set_search_mode(true);
+            apply_search(&state_handle, &ui, query);
+            label.select_region(0, 0);
+        });
+    }
+    window.add_action(&search_action);
+
+    let clear_action = gtk::gio::SimpleAction::new(clear_action_name, None);
+    {
+        let label = label.clone();
+        clear_action.connect_activate(move |_, _| {
+            label.select_region(0, 0);
+        });
+    }
+    window.add_action(&clear_action);
+}
+
 fn connect_ui_signals(state: &Rc<RefCell<AppState>>, ui: &Ui, controls: &UiControls) {
     let suppress_search_changed = Rc::new(Cell::new(false));
     let reshuffle_action = gtk::gio::SimpleAction::new("reshuffle", None);
     reshuffle_action.set_enabled(state.borrow().random_sort);
-    let search_selected_text_action = gtk::gio::SimpleAction::new("search-selected-text", None);
-    let clear_selected_text_action = gtk::gio::SimpleAction::new("clear-selected-text", None);
     {
         let list = ui.list.clone();
         let popover = build_item_context_popover(&list);
@@ -254,43 +297,28 @@ fn connect_ui_signals(state: &Rc<RefCell<AppState>>, ui: &Ui, controls: &UiContr
         controls.window.add_controller(key_controller);
     }
     {
-        let detail = ui.detail.clone();
-        let menu = gtk::gio::Menu::new();
-        menu.append(
-            Some("Search selected text"),
-            Some("win.search-selected-text"),
+        install_label_selection_menu_and_actions(
+            &controls.window,
+            state,
+            ui,
+            &controls.search,
+            &controls.search_bar,
+            &suppress_search_changed,
+            &ui.detail,
+            "search-selected-text",
+            "clear-selected-text",
         );
-        menu.append(Some("Clear selection"), Some("win.clear-selected-text"));
-        detail.set_extra_menu(Some(&menu));
-    }
-    {
-        let state_handle = state.clone();
-        let ui = ui.clone();
-        let search = controls.search.clone();
-        let search_bar = controls.search_bar.clone();
-        let suppress = suppress_search_changed.clone();
-        let detail = ui.detail.clone();
-        search_selected_text_action.connect_activate(move |_, _| {
-            let Some(query) = selected_text_from_label(&detail) else {
-                show_toast(&ui, "No selected text");
-                return;
-            };
-
-            suppress.set(true);
-            search.set_text(&query);
-            suppress.set(false);
-            search_bar.set_search_mode(true);
-            apply_search(&state_handle, &ui, query);
-            detail.select_region(0, 0);
-        });
-        controls.window.add_action(&search_selected_text_action);
-    }
-    {
-        let detail = ui.detail.clone();
-        clear_selected_text_action.connect_activate(move |_, _| {
-            detail.select_region(0, 0);
-        });
-        controls.window.add_action(&clear_selected_text_action);
+        install_label_selection_menu_and_actions(
+            &controls.window,
+            state,
+            ui,
+            &controls.search,
+            &controls.search_bar,
+            &suppress_search_changed,
+            &ui.title,
+            "search-selected-title-text",
+            "clear-selected-title-text",
+        );
     }
     {
         let state_handle = state.clone();

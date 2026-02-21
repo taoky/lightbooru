@@ -175,6 +175,9 @@ Adw.ApplicationWindow main_window {
                         Label title {
                           xalign: 0.0;
                           wrap: true;
+                          wrap-mode: word_char;
+                          selectable: true;
+                          extra-menu: title_selection_menu;
                           css-classes: ["title-2"];
                         }
 
@@ -248,6 +251,7 @@ Adw.ApplicationWindow main_window {
                           wrap: true;
                           wrap-mode: word_char;
                           selectable: true;
+                          extra-menu: detail_selection_menu;
                         }
                       };
                     };
@@ -423,4 +427,14 @@ menu main_menu {
   item ("Random sort", "win.random-sort")
   item ("Reshuffle", "win.reshuffle")
   item ("Rescan library", "win.rescan")
+}
+
+menu detail_selection_menu {
+  item ("Search selected text", "win.search-selected-text")
+  item ("Clear selection", "win.clear-selected-text")
+}
+
+menu title_selection_menu {
+  item ("Search selected text", "win.search-selected-title-text")
+  item ("Clear selection", "win.clear-selected-title-text")
 }
