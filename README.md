@@ -27,3 +27,19 @@ function get_gallery {
 ```
 
 Note that lightbooru, by default, scans `~/Pictures/gallery-dl/`.
+
+## Build
+
+```sh
+cargo build -p booru-tui --release
+cargo build -p booru-web --release
+cargo build -p booru-gtk --release
+```
+
+## Screenshot
+
+![tui.png](assets/tui.png)
+
+![web.png](assets/web.png)
+
+![gtk.png](assets/gtk.png)
