@@ -58,3 +58,10 @@
 .source-url {
   padding-left: 0px;
 }
+
+.author-link {
+  color: var(--accent-color);
+  text-decoration-line: underline;
+  padding: 0;
+  min-height: 0;
+}

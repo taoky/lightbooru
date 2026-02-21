@@ -117,7 +117,7 @@ pub(super) fn refresh_grid(state: &Rc<RefCell<AppState>>, ui: &Ui) {
 struct DetailSnapshot {
     image_path: PathBuf,
     title: String,
-    author: String,
+    author: Option<String>,
     date: String,
     source_url: Option<String>,
     detail: String,
@@ -136,7 +136,10 @@ pub(super) fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
         DetailSnapshot {
             image_path: item.image_path.clone(),
             title: infer_title(item),
-            author: item.merged_author().unwrap_or_else(|| "-".to_string()),
+            author: item
+                .merged_author()
+                .map(|author| author.trim().to_string())
+                .filter(|author| !author.is_empty()),
             date: item.merged_date().unwrap_or_else(|| "-".to_string()),
             source_url: item.platform_url(),
             detail: item.merged_detail().unwrap_or_default(),
@@ -149,18 +152,29 @@ pub(super) fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
     ui.detail_stack.set_visible_child_name("detail");
     ui.edit_sheet.set_can_open(true);
     ui.title.set_text(&snapshot.title);
-    ui.author.set_text(&format!("Author: {}", snapshot.author));
+    ui.author
+        .set_label(snapshot.author.as_deref().unwrap_or("-"));
+    ui.author.set_sensitive(snapshot.author.is_some());
+    ui.author.set_tooltip_text(
+        snapshot
+            .author
+            .as_ref()
+            .map(|_| "Click to search by author")
+            .or(Some("No author available")),
+    );
     ui.date.set_text(&format!("Date: {}", snapshot.date));
     match snapshot.source_url.as_deref() {
         Some(url) => {
             ui.source_url.set_uri(url);
             ui.source_url.set_label(url);
             ui.source_url.set_sensitive(true);
+            ui.search_same_source_button.set_sensitive(true);
         }
         None => {
             ui.source_url.set_uri("about:blank");
             ui.source_url.set_label("(none)");
             ui.source_url.set_sensitive(false);
+            ui.search_same_source_button.set_sensitive(false);
         }
     }
     ui.open_file_button.set_sensitive(true);
@@ -208,10 +222,7 @@ pub(super) fn refresh_detail(state: &Rc<RefCell<AppState>>, ui: &Ui) {
                     show_error_dialog(
                         &ui_handle,
                         "Image preview unavailable",
-                        &format!(
-                            "{} ({err})",
-                            image_path.display()
-                        ),
+                        &format!("{} ({err})", image_path.display()),
                     );
                 }
             }
@@ -230,11 +241,14 @@ fn clear_detail(ui: &Ui) {
     ui.edit_sheet.set_can_open(false);
     ui.detail_stack.set_visible_child_name("empty");
     ui.title.set_text("(no match)");
-    ui.author.set_text("");
+    ui.author.set_label("-");
+    ui.author.set_sensitive(false);
+    ui.author.set_tooltip_text(None::<&str>);
     ui.date.set_text("");
     ui.source_url.set_uri("about:blank");
     ui.source_url.set_label("(none)");
     ui.source_url.set_sensitive(false);
+    ui.search_same_source_button.set_sensitive(false);
     ui.open_file_button.set_sensitive(false);
     ui.detail.set_text("");
     ui.tag_values.borrow_mut().clear();
@@ -269,13 +283,7 @@ pub(super) fn open_selected_file(state: &Rc<RefCell<AppState>>, ui: &Ui) {
 }
 
 pub(super) fn open_selected_source_url(state: &Rc<RefCell<AppState>>, ui: &Ui) {
-    let Some(source_url) = ({
-        let state = state.borrow();
-        state
-            .selected_item_index()
-            .and_then(|idx| state.library.index.items.get(idx))
-            .and_then(|item| item.platform_url())
-    }) else {
+    let Some(source_url) = selected_source_url(state) else {
         show_error_dialog(
             ui,
             "Open source URL failed",
@@ -292,6 +300,35 @@ pub(super) fn open_selected_source_url(state: &Rc<RefCell<AppState>>, ui: &Ui) {
             show_error_dialog(ui, "Failed to open source URL", &format!("{err}"));
         }
     }
+}
+
+pub(super) fn apply_search(state: &Rc<RefCell<AppState>>, ui: &Ui, query: String) {
+    {
+        let mut state = state.borrow_mut();
+        state.query = query;
+        state.rebuild_filter();
+        // Keep search passive: changing the filter should not implicitly open a detail item.
+        state.selected_pos = None;
+    }
+    rebuild_view(state, ui);
+}
+
+pub(super) fn selected_author(state: &Rc<RefCell<AppState>>) -> Option<String> {
+    let state = state.borrow();
+    state
+        .selected_item_index()
+        .and_then(|idx| state.library.index.items.get(idx))
+        .and_then(|item| item.merged_author())
+        .map(|author| author.trim().to_string())
+        .filter(|author| !author.is_empty())
+}
+
+pub(super) fn selected_source_url(state: &Rc<RefCell<AppState>>) -> Option<String> {
+    let state = state.borrow();
+    state
+        .selected_item_index()
+        .and_then(|idx| state.library.index.items.get(idx))
+        .and_then(|item| item.platform_url())
 }
 
 fn launch_uri(uri: &str) -> Result<()> {

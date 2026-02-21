@@ -12,8 +12,8 @@ use adw::{
 };
 use booru_core::{Library, SearchQuery, SearchSort};
 use gtk::{
-    self, Button, Entry, GridView, Label, LinkButton, ListBox, Picture, ScrolledWindow, SearchEntry,
-    SingleSelection, TextView,
+    self, Button, Entry, GridView, Label, LinkButton, ListBox, Picture, ScrolledWindow,
+    SearchEntry, SingleSelection, TextView,
 };
 
 use self::image_loader::ImageLoader;
@@ -78,10 +78,12 @@ impl AppState {
     }
 
     fn rebuild_filter(&mut self) {
-        let use_aliases = !self.query.trim().is_empty();
+        let (terms, source_url) = split_search_terms_and_source_url(&self.query);
+        let use_aliases = !terms.is_empty();
         let result = self.library.search(
-            SearchQuery::new(split_search_terms(&self.query))
+            SearchQuery::new(terms)
                 .with_aliases(use_aliases)
+                .with_source_url(source_url)
                 .with_sort(SearchSort::FileNameAsc),
         );
 
@@ -117,9 +119,10 @@ struct Ui {
     browser_stack: ViewStack,
     picture: Picture,
     title: Label,
-    author: Label,
+    author: Button,
     date: Label,
     source_url: LinkButton,
+    search_same_source_button: Button,
     open_file_button: Button,
     detail: Label,
     tags_wrap: WrapBox,
@@ -162,4 +165,20 @@ fn split_search_terms(input: &str) -> Vec<String> {
         .filter(|term| !term.is_empty())
         .map(ToString::to_string)
         .collect()
+}
+
+fn split_search_terms_and_source_url(input: &str) -> (Vec<String>, Option<String>) {
+    let mut terms = Vec::new();
+    let mut source_url = None;
+
+    for term in split_search_terms(input) {
+        let lower = term.to_ascii_lowercase();
+        if source_url.is_none() && (lower.starts_with("http://") || lower.starts_with("https://")) {
+            source_url = Some(term);
+        } else {
+            terms.push(term);
+        }
+    }
+
+    (terms, source_url)
 }

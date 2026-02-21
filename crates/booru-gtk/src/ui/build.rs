@@ -11,10 +11,11 @@ use tracing::debug;
 
 use super::image_loader::{ImageLoader, ImageRequestKind};
 use super::view::{
-    append_pending_tags_input, ensure_selected_item_visible, grid_cell_widgets,
-    infer_thumbnail_title, install_tag_editor_css, rebuild_tag_wrap, rebuild_view, refresh_detail,
-    refresh_grid, rescan_library, save_selected_edits, show_error_dialog, show_toast,
-    sync_browser_selection, open_selected_file, open_selected_source_url,
+    append_pending_tags_input, apply_search, ensure_selected_item_visible, grid_cell_widgets,
+    infer_thumbnail_title, install_tag_editor_css, open_selected_file, open_selected_source_url,
+    rebuild_tag_wrap, rebuild_view, refresh_detail, refresh_grid, rescan_library,
+    save_selected_edits, selected_author, selected_source_url, show_error_dialog, show_toast,
+    sync_browser_selection,
 };
 use super::*;
 
@@ -44,9 +45,11 @@ impl Ui {
         let browser_stack: ViewStack = builder_object(builder, "browser_stack");
         let picture: Picture = builder_object(builder, "picture");
         let title: Label = builder_object(builder, "title");
-        let author: Label = builder_object(builder, "author");
+        let author: Button = builder_object(builder, "author");
         let date: Label = builder_object(builder, "date");
         let source_url: gtk::LinkButton = builder_object(builder, "source_url");
+        let search_same_source_button: Button =
+            builder_object(builder, "search_same_source_button");
         let open_file_button: Button = builder_object(builder, "open_file_button");
         let detail: Label = builder_object(builder, "detail");
         let tags_wrap: WrapBox = builder_object(builder, "tags_wrap");
@@ -75,6 +78,7 @@ impl Ui {
             author,
             date,
             source_url,
+            search_same_source_button,
             open_file_button,
             detail,
             tags_wrap,
@@ -187,13 +191,12 @@ fn build_item_context_popover(parent: &impl gtk::prelude::IsA<gtk::Widget>) -> g
 }
 
 fn popup_context_menu(popover: &gtk::PopoverMenu, x: f64, y: f64) {
-    popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
-        x as i32, y as i32, 1, 1,
-    )));
+    popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
     popover.popup();
 }
 
 fn connect_ui_signals(state: &Rc<RefCell<AppState>>, ui: &Ui, controls: &UiControls) {
+    let suppress_search_changed = Rc::new(Cell::new(false));
     {
         let list = ui.list.clone();
         let popover = build_item_context_popover(&list);
@@ -230,6 +233,26 @@ fn connect_ui_signals(state: &Rc<RefCell<AppState>>, ui: &Ui, controls: &UiContr
     {
         let state_handle = state.clone();
         let ui = ui.clone();
+        let search = controls.search.clone();
+        let search_bar = controls.search_bar.clone();
+        let suppress = suppress_search_changed.clone();
+        let author = ui.author.clone();
+        author.connect_clicked(move |_| {
+            let Some(author_name) = selected_author(&state_handle) else {
+                show_toast(&ui, "No author available for selected item");
+                return;
+            };
+
+            suppress.set(true);
+            search.set_text(&author_name);
+            suppress.set(false);
+            search_bar.set_search_mode(true);
+            apply_search(&state_handle, &ui, author_name);
+        });
+    }
+    {
+        let state_handle = state.clone();
+        let ui = ui.clone();
         let open_file_button = ui.open_file_button.clone();
         open_file_button.connect_clicked(move |_| {
             open_selected_file(&state_handle, &ui);
@@ -252,6 +275,27 @@ fn connect_ui_signals(state: &Rc<RefCell<AppState>>, ui: &Ui, controls: &UiContr
             open_selected_source_url(&state_handle, &ui);
         });
         controls.window.add_action(&open_source_action);
+    }
+    {
+        let state_handle = state.clone();
+        let ui = ui.clone();
+        let search = controls.search.clone();
+        let search_bar = controls.search_bar.clone();
+        let suppress = suppress_search_changed.clone();
+        let search_same_source_button = ui.search_same_source_button.clone();
+        search_same_source_button.connect_clicked(move |_| {
+            let Some(source_url) = selected_source_url(&state_handle) else {
+                show_toast(&ui, "No source URL available for selected item");
+                return;
+            };
+
+            suppress.set(true);
+            search.set_text(&source_url);
+            suppress.set(false);
+            search_bar.set_search_mode(true);
+            apply_search(&state_handle, &ui, source_url);
+            show_toast(&ui, "Filtered by source URL; clear search to reset");
+        });
     }
     {
         let split = controls.split.clone();
@@ -299,14 +343,12 @@ fn connect_ui_signals(state: &Rc<RefCell<AppState>>, ui: &Ui, controls: &UiContr
     {
         let state_handle = state.clone();
         let ui = ui.clone();
+        let suppress = suppress_search_changed.clone();
         controls.search.connect_search_changed(move |entry| {
-            let mut state = state_handle.borrow_mut();
-            state.query = entry.text().to_string();
-            state.rebuild_filter();
-            // Keep search passive: typing should not implicitly select and open a detail item.
-            state.selected_pos = None;
-            drop(state);
-            rebuild_view(&state_handle, &ui);
+            if suppress.get() {
+                return;
+            }
+            apply_search(&state_handle, &ui, entry.text().to_string());
         });
     }
     {

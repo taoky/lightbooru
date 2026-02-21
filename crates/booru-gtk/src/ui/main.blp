@@ -91,7 +91,7 @@ Adw.ApplicationWindow main_window {
 
               child: SearchEntry search {
                 hexpand: true;
-                placeholder-text: "Search tags/author/detail";
+                placeholder-text: "Search tags/author/detail/source URL";
               };
             }
 
@@ -178,8 +178,21 @@ Adw.ApplicationWindow main_window {
                           css-classes: ["title-2"];
                         }
 
-                        Label author {
-                          xalign: 0.0;
+                        Box author_row {
+                          orientation: horizontal;
+                          spacing: 6;
+
+                          Label author_title {
+                            label: "Author:";
+                            xalign: 0.0;
+                          }
+
+                          Button author {
+                            label: "-";
+                            sensitive: false;
+                            halign: start;
+                            css-classes: ["flat", "author-link"];
+                          }
                         }
 
                         Label date {
@@ -203,11 +216,22 @@ Adw.ApplicationWindow main_window {
                             sensitive: false;
                             css-classes: ["source-url", "link"];
                           }
+
                         }
 
-                        Button open_file_button {
-                          label: "Open file";
+                        Box detail_actions {
+                          orientation: horizontal;
+                          spacing: 8;
                           halign: start;
+
+                          Button open_file_button {
+                            label: "Open file";
+                          }
+
+                          Button search_same_source_button {
+                            label: "Search same source URL";
+                            sensitive: false;
+                          }
                         }
 
                         Picture picture {
