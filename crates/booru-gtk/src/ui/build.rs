@@ -195,10 +195,31 @@ fn popup_context_menu(popover: &gtk::PopoverMenu, x: f64, y: f64) {
     popover.popup();
 }
 
+fn selected_text_from_label(label: &Label) -> Option<String> {
+    let (raw_start, raw_end) = label.selection_bounds()?;
+    let start = usize::try_from(raw_start.min(raw_end)).ok()?;
+    let end = usize::try_from(raw_start.max(raw_end)).ok()?;
+    if start >= end {
+        return None;
+    }
+
+    let text = label.text();
+    let chars: Vec<char> = text.chars().collect();
+    if end > chars.len() {
+        return None;
+    }
+
+    let selected: String = chars[start..end].iter().collect();
+    let selected = selected.trim().to_string();
+    (!selected.is_empty()).then_some(selected)
+}
+
 fn connect_ui_signals(state: &Rc<RefCell<AppState>>, ui: &Ui, controls: &UiControls) {
     let suppress_search_changed = Rc::new(Cell::new(false));
     let reshuffle_action = gtk::gio::SimpleAction::new("reshuffle", None);
     reshuffle_action.set_enabled(state.borrow().random_sort);
+    let search_selected_text_action = gtk::gio::SimpleAction::new("search-selected-text", None);
+    let clear_selected_text_action = gtk::gio::SimpleAction::new("clear-selected-text", None);
     {
         let list = ui.list.clone();
         let popover = build_item_context_popover(&list);
@@ -231,6 +252,45 @@ fn connect_ui_signals(state: &Rc<RefCell<AppState>>, ui: &Ui, controls: &UiContr
             gtk::glib::Propagation::Proceed
         });
         controls.window.add_controller(key_controller);
+    }
+    {
+        let detail = ui.detail.clone();
+        let menu = gtk::gio::Menu::new();
+        menu.append(
+            Some("Search selected text"),
+            Some("win.search-selected-text"),
+        );
+        menu.append(Some("Clear selection"), Some("win.clear-selected-text"));
+        detail.set_extra_menu(Some(&menu));
+    }
+    {
+        let state_handle = state.clone();
+        let ui = ui.clone();
+        let search = controls.search.clone();
+        let search_bar = controls.search_bar.clone();
+        let suppress = suppress_search_changed.clone();
+        let detail = ui.detail.clone();
+        search_selected_text_action.connect_activate(move |_, _| {
+            let Some(query) = selected_text_from_label(&detail) else {
+                show_toast(&ui, "No selected text");
+                return;
+            };
+
+            suppress.set(true);
+            search.set_text(&query);
+            suppress.set(false);
+            search_bar.set_search_mode(true);
+            apply_search(&state_handle, &ui, query);
+            detail.select_region(0, 0);
+        });
+        controls.window.add_action(&search_selected_text_action);
+    }
+    {
+        let detail = ui.detail.clone();
+        clear_selected_text_action.connect_activate(move |_, _| {
+            detail.select_region(0, 0);
+        });
+        controls.window.add_action(&clear_selected_text_action);
     }
     {
         let state_handle = state.clone();
