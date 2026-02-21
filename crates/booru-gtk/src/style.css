@@ -54,3 +54,7 @@
   background: transparent;
   color: inherit;
 }
+
+.source-url {
+  padding-left: 0px;
+}
