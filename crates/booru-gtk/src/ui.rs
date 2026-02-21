@@ -15,6 +15,7 @@ use gtk::{
     self, Button, Entry, GridView, Label, LinkButton, ListBox, Picture, ScrolledWindow,
     SearchEntry, SingleSelection, TextView,
 };
+use rand::seq::SliceRandom;
 
 use self::image_loader::ImageLoader;
 
@@ -57,6 +58,7 @@ pub(crate) struct AppState {
     filter_version: u64,
     browser_mode: BrowserMode,
     show_sensitive: bool,
+    random_sort: bool,
     query: String,
     quiet: bool,
 }
@@ -68,8 +70,9 @@ impl AppState {
             filtered_indices: Vec::new(),
             selected_pos: None,
             filter_version: 0,
-            browser_mode: BrowserMode::List,
+            browser_mode: BrowserMode::Grid,
             show_sensitive,
+            random_sort: true,
             query: String::new(),
             quiet,
         };
@@ -79,6 +82,7 @@ impl AppState {
 
     fn rebuild_filter(&mut self) {
         let (terms, source_url) = split_search_terms_and_source_url(&self.query);
+        let has_source_url_filter = source_url.is_some();
         let use_aliases = !terms.is_empty();
         let result = self.library.search(
             SearchQuery::new(terms)
@@ -92,6 +96,10 @@ impl AppState {
             .into_iter()
             .filter(|idx| self.show_sensitive || !self.library.index.items[*idx].merged_sensitive())
             .collect();
+        if self.random_sort && !has_source_url_filter {
+            let mut rng = rand::thread_rng();
+            self.filtered_indices.shuffle(&mut rng);
+        }
 
         self.selected_pos = match (self.selected_pos, self.filtered_indices.is_empty()) {
             (_, true) => None,

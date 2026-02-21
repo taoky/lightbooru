@@ -197,6 +197,8 @@ fn popup_context_menu(popover: &gtk::PopoverMenu, x: f64, y: f64) {
 
 fn connect_ui_signals(state: &Rc<RefCell<AppState>>, ui: &Ui, controls: &UiControls) {
     let suppress_search_changed = Rc::new(Cell::new(false));
+    let reshuffle_action = gtk::gio::SimpleAction::new("reshuffle", None);
+    reshuffle_action.set_enabled(state.borrow().random_sort);
     {
         let list = ui.list.clone();
         let popover = build_item_context_popover(&list);
@@ -374,6 +376,47 @@ fn connect_ui_signals(state: &Rc<RefCell<AppState>>, ui: &Ui, controls: &UiContr
             }
         });
         controls.window.add_action(&show_sensitive_action);
+    }
+    {
+        let state_handle = state.clone();
+        let ui = ui.clone();
+        let reshuffle_action_handle = reshuffle_action.clone();
+        let random_sort_action = gtk::gio::SimpleAction::new_stateful(
+            "random-sort",
+            None,
+            &gtk::glib::Variant::from(state.borrow().random_sort),
+        );
+        random_sort_action.connect_activate(move |action, _| {
+            let mut state = state_handle.borrow_mut();
+            state.random_sort = !state.random_sort;
+            state.rebuild_filter();
+            let random_sort = state.random_sort;
+            drop(state);
+            action.set_state(&gtk::glib::Variant::from(random_sort));
+            reshuffle_action_handle.set_enabled(random_sort);
+            rebuild_view(&state_handle, &ui);
+            if random_sort {
+                show_toast(&ui, "Random sort enabled");
+            } else {
+                show_toast(&ui, "Random sort disabled");
+            }
+        });
+        controls.window.add_action(&random_sort_action);
+    }
+    {
+        let state_handle = state.clone();
+        let ui = ui.clone();
+        reshuffle_action.connect_activate(move |_, _| {
+            let mut state = state_handle.borrow_mut();
+            if !state.random_sort {
+                return;
+            }
+            state.rebuild_filter();
+            drop(state);
+            rebuild_view(&state_handle, &ui);
+            show_toast(&ui, "Reshuffled");
+        });
+        controls.window.add_action(&reshuffle_action);
     }
     {
         let state_handle = state.clone();

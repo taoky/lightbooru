@@ -246,6 +246,7 @@ Adw.ApplicationWindow main_window {
                         Label detail {
                           xalign: 0.0;
                           wrap: true;
+                          wrap-mode: word_char;
                           selectable: true;
                         }
                       };
@@ -419,5 +420,7 @@ Button tags_add_button {
 
 menu main_menu {
   item ("Show sensitive", "win.show-sensitive")
+  item ("Random sort", "win.random-sort")
+  item ("Reshuffle", "win.reshuffle")
   item ("Rescan library", "win.rescan")
 }

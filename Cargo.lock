@@ -437,6 +437,7 @@ dependencies = [
  "clap",
  "gtk4",
  "libadwaita",
+ "rand 0.8.5",
  "tracing",
  "tracing-subscriber",
 ]
