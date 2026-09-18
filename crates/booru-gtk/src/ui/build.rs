@@ -4,8 +4,8 @@ use std::rc::Rc;
 use adw::prelude::*;
 use adw::{Application, BottomSheet, NavigationSplitView, ToggleGroup};
 use gtk::{
-    self, Box as GtkBox, Button, GridView, Label, Picture, SearchEntry, SelectionMode,
-    SignalListItemFactory, SingleSelection,
+    self, Box as GtkBox, Button, GridView, Label, Picture, SearchEntry, SignalListItemFactory,
+    SingleSelection,
 };
 use tracing::debug;
 
@@ -13,14 +13,14 @@ use super::image_loader::{ImageLoader, ImageRequestKind};
 use super::view::{
     append_pending_tags_input, apply_search, ensure_selected_item_visible, grid_cell_widgets,
     infer_thumbnail_title, install_tag_editor_css, open_selected_file, open_selected_source_url,
-    rebuild_tag_wrap, rebuild_view, refresh_detail, refresh_grid, rescan_library,
+    rebuild_tag_wrap, rebuild_view, refresh_browser, refresh_detail, rescan_library,
     save_selected_edits, selected_author, selected_source_url, show_error_dialog, show_toast,
     sync_browser_selection,
 };
 use super::*;
 
 #[derive(Clone)]
-pub(super) struct GridItemData {
+pub(super) struct BrowserItemData {
     pub(super) item_idx: usize,
     pub(super) texture: Rc<RefCell<Option<gtk::gdk::Texture>>>,
     pub(super) pending_request_id: Rc<Cell<Option<u64>>>,
@@ -39,8 +39,7 @@ impl Ui {
         let browse_mode_group: ToggleGroup = builder_object(builder, "browse_mode_group");
         let banner: Banner = builder_object(builder, "banner");
         let split: NavigationSplitView = builder_object(builder, "split");
-        let list: ListBox = builder_object(builder, "list");
-        let list_scroll: ScrolledWindow = builder_object(builder, "list_scroll");
+        let list: ListView = builder_object(builder, "list");
         let grid: GridView = builder_object(builder, "grid");
         let browser_stack: ViewStack = builder_object(builder, "browser_stack");
         let picture: Picture = builder_object(builder, "picture");
@@ -62,16 +61,19 @@ impl Ui {
         let edit_bar: gtk::CenterBox = builder_object(builder, "edit_bar");
         let save_button: Button = builder_object(builder, "save_button");
 
-        list.set_selection_mode(SelectionMode::Single);
-        let (grid_store, grid_selection) = setup_grid_factory(state, &grid, image_loader.clone());
+        let browser_store = gtk::gio::ListStore::new::<gtk::glib::BoxedAnyObject>();
+        let browser_selection = SingleSelection::new(Some(browser_store.clone()));
+        browser_selection.set_autoselect(false);
+        browser_selection.set_can_unselect(true);
+        setup_grid_factory(state, &grid, &browser_selection, image_loader.clone());
+        setup_list_factory(state, &list, &browser_selection, &split);
 
         let ui = Self {
             window: window.clone(),
             list,
-            list_scroll,
             grid,
-            grid_store,
-            grid_selection,
+            browser_store,
+            browser_selection,
             browser_stack,
             picture,
             title,
@@ -93,7 +95,8 @@ impl Ui {
             banner,
             detail_image_seq: Rc::new(Cell::new(0)),
             detail_pending_request_id: Rc::new(Cell::new(None)),
-            grid_loaded_version: Rc::new(Cell::new(0)),
+            browser_loaded_version: Rc::new(Cell::new(0)),
+            updating_browser: Rc::new(Cell::new(false)),
             image_loader,
         };
 
@@ -264,23 +267,6 @@ fn connect_ui_signals(state: &Rc<RefCell<AppState>>, ui: &Ui, controls: &UiContr
     let reshuffle_action = gtk::gio::SimpleAction::new("reshuffle", None);
     reshuffle_action.set_enabled(state.borrow().random_sort_active());
     {
-        let list = ui.list.clone();
-        let popover = build_item_context_popover(&list);
-
-        let list_handle = list.clone();
-        let popover_handle = popover.clone();
-        let right_click = gtk::GestureClick::builder().button(3).build();
-        right_click.connect_pressed(move |gesture, _, x, y| {
-            let Some(row) = list_handle.row_at_y(y as i32) else {
-                return;
-            };
-            list_handle.select_row(Some(&row));
-            popup_context_menu(&popover_handle, x, y);
-            gesture.set_state(gtk::EventSequenceState::Claimed);
-        });
-        list.add_controller(right_click);
-    }
-    {
         let search_bar = controls.search_bar.clone();
         let search = controls.search.clone();
         let key_controller = gtk::EventControllerKey::new();
@@ -418,12 +404,8 @@ fn connect_ui_signals(state: &Rc<RefCell<AppState>>, ui: &Ui, controls: &UiContr
                     let mut state = state_handle.borrow_mut();
                     state.browser_mode = mode;
                 }
-                ui.browser_stack.set_visible_child_name(mode.as_name());
-                if matches!(mode, BrowserMode::Grid) {
-                    refresh_grid(&state_handle, &ui);
-                }
+                refresh_browser(&state_handle, &ui);
                 let selected_pos = state_handle.borrow().selected_pos;
-                sync_browser_selection(&ui, selected_pos);
                 let ui_handle = ui.clone();
                 gtk::glib::idle_add_local_once(move || {
                     ensure_selected_item_visible(&ui_handle, selected_pos);
@@ -510,32 +492,11 @@ fn connect_ui_signals(state: &Rc<RefCell<AppState>>, ui: &Ui, controls: &UiContr
     {
         let state_handle = state.clone();
         let ui = ui.clone();
-        let list_handle = ui.list.clone();
-        list_handle.connect_row_selected(move |_list, row| {
-            let mut state = state_handle.borrow_mut();
-            let selected_pos = row
-                .and_then(|row| usize::try_from(row.index()).ok())
-                .filter(|pos| *pos < state.filtered_indices.len());
-            state.selected_pos = selected_pos;
-            drop(state);
-            sync_browser_selection(&ui, selected_pos);
-            refresh_detail(&state_handle, &ui);
-        });
-    }
-    {
-        let split = controls.split.clone();
-        let list_handle = ui.list.clone();
-        list_handle.connect_row_activated(move |_, _| {
-            if split.is_collapsed() {
-                split.set_show_content(true);
+        let browser_selection_handle = ui.browser_selection.clone();
+        browser_selection_handle.connect_selected_notify(move |selection| {
+            if ui.updating_browser.get() {
+                return;
             }
-        });
-    }
-    {
-        let state_handle = state.clone();
-        let ui = ui.clone();
-        let grid_selection_handle = ui.grid_selection.clone();
-        grid_selection_handle.connect_selected_notify(move |selection| {
             let selected_pos = match selection.selected() {
                 gtk::INVALID_LIST_POSITION => None,
                 pos => usize::try_from(pos).ok(),
@@ -558,8 +519,9 @@ fn connect_ui_signals(state: &Rc<RefCell<AppState>>, ui: &Ui, controls: &UiContr
         let split = controls.split.clone();
         let state_handle = state.clone();
         let ui = ui.clone();
+        let list_handle = ui.list.clone();
         let grid_handle = ui.grid.clone();
-        grid_handle.connect_activate(move |_, pos| {
+        let activate = Rc::new(move |pos: u32| {
             let activated_pos = usize::try_from(pos).ok();
             let (selected_pos, changed) = {
                 let mut state = state_handle.borrow_mut();
@@ -578,6 +540,9 @@ fn connect_ui_signals(state: &Rc<RefCell<AppState>>, ui: &Ui, controls: &UiContr
                 split.set_show_content(selected_pos.is_some());
             }
         });
+        let list_activate = activate.clone();
+        list_handle.connect_activate(move |_, pos| list_activate(pos));
+        grid_handle.connect_activate(move |_, pos| activate(pos));
     }
     {
         let state_handle = state.clone();
@@ -608,43 +573,142 @@ fn connect_ui_signals(state: &Rc<RefCell<AppState>>, ui: &Ui, controls: &UiContr
     }
 }
 
+fn install_browser_item_context_menu(
+    widget: &impl IsA<gtk::Widget>,
+    list_item: &gtk::ListItem,
+    selection: &SingleSelection,
+) {
+    let popover = build_item_context_popover(widget);
+    let list_item = list_item.downgrade();
+    let selection = selection.clone();
+    let right_click = gtk::GestureClick::builder().button(3).build();
+    right_click.connect_pressed(move |gesture, _, x, y| {
+        let Some(list_item) = list_item.upgrade() else {
+            return;
+        };
+        let pos = list_item.position();
+        if pos == gtk::INVALID_LIST_POSITION {
+            return;
+        }
+        selection.set_selected(pos);
+        popup_context_menu(&popover, x, y);
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+    });
+    widget.add_controller(right_click);
+}
+
+fn setup_list_factory(
+    state: &Rc<RefCell<AppState>>,
+    list: &ListView,
+    selection: &SingleSelection,
+    split: &NavigationSplitView,
+) {
+    let factory = SignalListItemFactory::new();
+    let selection = selection.clone();
+    let split = split.clone();
+    factory.connect_setup(move |_, object| {
+        let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let row = GtkBox::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(4)
+            .margin_top(8)
+            .margin_bottom(8)
+            .margin_start(12)
+            .margin_end(12)
+            .build();
+        let title = Label::builder()
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .build();
+        let subtitle = Label::builder()
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .build();
+        subtitle.add_css_class("dim-label");
+        row.append(&title);
+        row.append(&subtitle);
+        install_browser_item_context_menu(&row, item, &selection);
+        // ListView's single-click activation also selects on hover. Keep it
+        // disabled and open the collapsed detail pane only on an actual click.
+        let item_weak = item.downgrade();
+        let selection = selection.clone();
+        let split = split.clone();
+        let click = gtk::GestureClick::builder().button(1).build();
+        click.connect_released(move |_, _, _, _| {
+            let Some(item) = item_weak.upgrade() else {
+                return;
+            };
+            let pos = item.position();
+            if split.is_collapsed() && pos != gtk::INVALID_LIST_POSITION {
+                selection.set_selected(pos);
+                split.set_show_content(true);
+            }
+        });
+        row.add_controller(click);
+        item.set_child(Some(&row));
+    });
+    let state = state.clone();
+    factory.connect_bind(move |_, object| {
+        let Some(list_item) = object.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let Some(boxed) = list_item
+            .item()
+            .and_then(|item| item.downcast::<gtk::glib::BoxedAnyObject>().ok())
+        else {
+            return;
+        };
+        let Some(row) = list_item.child() else {
+            return;
+        };
+        let Some(title) = row
+            .first_child()
+            .and_then(|child| child.downcast::<Label>().ok())
+        else {
+            return;
+        };
+        let Some(subtitle) = title
+            .next_sibling()
+            .and_then(|child| child.downcast::<Label>().ok())
+        else {
+            return;
+        };
+        let state = state.borrow();
+        let item_idx = boxed.borrow::<BrowserItemData>().item_idx;
+        let Some(item) = state.library.index.items.get(item_idx) else {
+            title.set_text("(missing)");
+            subtitle.set_text("");
+            row.set_tooltip_text(None::<&str>);
+            return;
+        };
+        let heading = infer_thumbnail_title(item);
+        let author = item.merged_author().unwrap_or_else(|| "-".to_string());
+        let date = item.merged_date().unwrap_or_else(|| "-".to_string());
+        title.set_text(&heading);
+        subtitle.set_text(&format!("{author} | {date}"));
+        row.set_tooltip_text(Some(&format!("{heading}\n{author} | {date}")));
+    });
+    list.set_factory(Some(&factory));
+}
+
 fn setup_grid_factory(
     state: &Rc<RefCell<AppState>>,
     grid: &GridView,
+    browser_selection: &SingleSelection,
     image_loader: Rc<ImageLoader>,
-) -> (gtk::gio::ListStore, SingleSelection) {
-    let grid_store = gtk::gio::ListStore::new::<gtk::glib::BoxedAnyObject>();
-    let grid_selection = SingleSelection::new(Some(grid_store.clone()));
-    grid_selection.set_autoselect(false);
-    grid_selection.set_can_unselect(true);
-
+) {
     let grid_factory = SignalListItemFactory::new();
     {
-        let grid_selection_handle = grid_selection.clone();
+        let browser_selection_handle = browser_selection.clone();
         grid_factory.connect_setup(move |_, list_item_obj| {
             let Some(list_item) = list_item_obj.downcast_ref::<gtk::ListItem>() else {
                 return;
             };
-            let list_item_handle = list_item.clone();
-
             let builder = gtk::Builder::from_string(GRID_CELL_UI);
             let card: GtkBox = builder_object(&builder, "card");
-
-            let popover = build_item_context_popover(&card);
-
-            let selection_handle = grid_selection_handle.clone();
-            let popover_handle = popover.clone();
-            let right_click = gtk::GestureClick::builder().button(3).build();
-            right_click.connect_pressed(move |gesture, _, x, y| {
-                let pos = list_item_handle.position();
-                if pos == gtk::INVALID_LIST_POSITION {
-                    return;
-                }
-                selection_handle.set_selected(pos);
-                popup_context_menu(&popover_handle, x, y);
-                gesture.set_state(gtk::EventSequenceState::Claimed);
-            });
-            card.add_controller(right_click);
+            install_browser_item_context_menu(&card, list_item, &browser_selection_handle);
 
             list_item.set_child(Some(&card));
         });
@@ -665,7 +729,7 @@ fn setup_grid_factory(
                 return;
             };
 
-            let data = boxed_item.borrow::<GridItemData>();
+            let data = boxed_item.borrow::<BrowserItemData>();
             let item_idx = data.item_idx;
             let texture_slot = data.texture.clone();
             let pending_request_id = data.pending_request_id.clone();
@@ -755,7 +819,7 @@ fn setup_grid_factory(
                 .item()
                 .and_then(|obj| obj.downcast::<gtk::glib::BoxedAnyObject>().ok())
                 .and_then(|boxed_item| {
-                    let data = boxed_item.borrow::<GridItemData>();
+                    let data = boxed_item.borrow::<BrowserItemData>();
                     data.pending_request_id.replace(None)
                 });
             if let Some(request_id) = pending_request_id {
@@ -773,10 +837,8 @@ fn setup_grid_factory(
         });
     }
 
-    grid.set_model(Some(&grid_selection));
     grid.set_factory(Some(&grid_factory));
     grid.set_single_click_activate(false);
     grid.set_max_columns(4);
     grid.set_min_columns(2);
-    (grid_store, grid_selection)
 }

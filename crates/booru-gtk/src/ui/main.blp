@@ -107,8 +107,8 @@ Adw.ApplicationWindow main_window {
                   hexpand: true;
                   vexpand: true;
 
-                  child: ListBox list {
-                    selection-mode: single;
+                  child: ListView list {
+                    single-click-activate: false;
                     css-classes: ["navigation-sidebar"];
                   };
                 };

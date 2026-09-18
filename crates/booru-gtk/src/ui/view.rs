@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use adw::{ActionRow, AlertDialog, Toast};
+use adw::{AlertDialog, Toast};
 use anyhow::{anyhow, Result};
 use booru_core::{apply_update_to_image, BooruConfig, EditUpdate, Library};
 use gtk::{self, Box as GtkBox, Button, Label, Picture, TextView};
@@ -43,81 +43,56 @@ pub(super) fn rebuild_view(state: &Rc<RefCell<AppState>>, ui: &Ui) {
             action.set_enabled(state.borrow().random_sort_active());
         }
     }
-    let browser_mode = state.borrow().browser_mode;
-    ui.browser_stack
-        .set_visible_child_name(browser_mode.as_name());
-    refresh_list(state, ui);
-    if matches!(browser_mode, BrowserMode::Grid) {
-        refresh_grid(state, ui);
-    }
+    refresh_browser(state, ui);
     refresh_detail(state, ui);
 }
 
-fn refresh_list(state: &Rc<RefCell<AppState>>, ui: &Ui) {
-    while let Some(row) = ui.list.row_at_index(0) {
-        ui.list.remove(&row);
-    }
-
-    let (rows, selected_pos) = {
+pub(super) fn refresh_browser(state: &Rc<RefCell<AppState>>, ui: &Ui) {
+    let (mode, selected_pos, version) = {
         let state = state.borrow();
-        let rows = state
-            .filtered_indices
-            .iter()
-            .map(|item_idx| {
-                let item = &state.library.index.items[*item_idx];
-                let title = infer_title(item);
-                let author = item.merged_author().unwrap_or_else(|| "-".to_string());
-                let date = item.merged_date().unwrap_or_else(|| "-".to_string());
-                let prefix = if item.merged_sensitive() { "[S] " } else { "" };
-                (format!("{prefix}{title}"), format!("{author} | {date}"))
-            })
-            .collect::<Vec<(String, String)>>();
-        (rows, state.selected_pos)
+        (state.browser_mode, state.selected_pos, state.filter_version)
     };
 
-    for (title, subtitle) in rows {
-        let row = ActionRow::new();
-        // Construction freezes notifications, delaying the internal labels' markup binding.
-        // Disable markup after construction, before passing any metadata to the labels.
-        row.set_use_markup(false);
-        row.set_title(&title);
-        row.set_subtitle(&subtitle);
-        row.set_activatable(true);
-        ui.list.append(&row);
+    // Keep the shared selection authoritative while replacing data or attaching
+    // a view: intermediate selection notifications must not reload details.
+    ui.updating_browser.set(true);
+    match mode {
+        BrowserMode::List => ui.grid.set_model(None::<&SingleSelection>),
+        BrowserMode::Grid => ui.list.set_model(None::<&SingleSelection>),
     }
 
+    if ui.browser_loaded_version.get() != version {
+        let items = {
+            let state = state.borrow();
+            state
+                .filtered_indices
+                .iter()
+                .map(|&item_idx| {
+                    gtk::glib::BoxedAnyObject::new(super::build::BrowserItemData {
+                        item_idx,
+                        texture: Rc::new(RefCell::new(None)),
+                        pending_request_id: Rc::new(Cell::new(None)),
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        ui.browser_store
+            .splice(0, ui.browser_store.n_items(), &items);
+        ui.browser_loaded_version.set(version);
+    }
+
+    match mode {
+        BrowserMode::List if ui.list.model().is_none() => {
+            ui.list.set_model(Some(&ui.browser_selection))
+        }
+        BrowserMode::Grid if ui.grid.model().is_none() => {
+            ui.grid.set_model(Some(&ui.browser_selection))
+        }
+        _ => {}
+    }
     sync_browser_selection(ui, selected_pos);
-    ensure_selected_item_visible(ui, selected_pos);
-}
-
-pub(super) fn refresh_grid(state: &Rc<RefCell<AppState>>, ui: &Ui) {
-    let (filtered_indices, selected_pos, filter_version) = {
-        let state = state.borrow();
-        (
-            state.filtered_indices.clone(),
-            state.selected_pos,
-            state.filter_version,
-        )
-    };
-
-    if ui.grid_loaded_version.get() == filter_version {
-        sync_browser_selection(ui, selected_pos);
-        ensure_selected_item_visible(ui, selected_pos);
-        return;
-    }
-
-    ui.grid_store.remove_all();
-    for item_idx in filtered_indices {
-        let boxed = gtk::glib::BoxedAnyObject::new(super::build::GridItemData {
-            item_idx,
-            texture: Rc::new(RefCell::new(None)),
-            pending_request_id: Rc::new(Cell::new(None)),
-        });
-        ui.grid_store.append(&boxed);
-    }
-
-    ui.grid_loaded_version.set(filter_version);
-    sync_browser_selection(ui, selected_pos);
+    ui.updating_browser.set(false);
+    ui.browser_stack.set_visible_child_name(mode.as_name());
     ensure_selected_item_visible(ui, selected_pos);
 }
 
@@ -498,37 +473,11 @@ pub(super) fn grid_cell_widgets(list_item: &gtk::ListItem) -> Option<(GtkBox, Pi
 }
 
 pub(super) fn sync_browser_selection(ui: &Ui, selected_pos: Option<usize>) {
-    let current_list_pos = ui
-        .list
-        .selected_row()
-        .and_then(|row| usize::try_from(row.index()).ok());
-    let current_grid_pos = match ui.grid_selection.selected() {
-        gtk::INVALID_LIST_POSITION => None,
-        pos => usize::try_from(pos).ok(),
-    };
-
-    match selected_pos {
-        Some(pos) => {
-            if current_list_pos != Some(pos) {
-                if let Some(row) = ui.list.row_at_index(pos as i32) {
-                    ui.list.select_row(Some(&row));
-                } else {
-                    ui.list.unselect_all();
-                }
-            }
-
-            if current_grid_pos != Some(pos) {
-                ui.grid_selection.set_selected(pos as u32);
-            }
-        }
-        None => {
-            if current_list_pos.is_some() {
-                ui.list.unselect_all();
-            }
-            if current_grid_pos.is_some() {
-                ui.grid_selection.set_selected(gtk::INVALID_LIST_POSITION);
-            }
-        }
+    let selected = selected_pos
+        .map(|pos| pos as u32)
+        .unwrap_or(gtk::INVALID_LIST_POSITION);
+    if ui.browser_selection.selected() != selected {
+        ui.browser_selection.set_selected(selected);
     }
 }
 
@@ -536,44 +485,21 @@ pub(super) fn ensure_selected_item_visible(ui: &Ui, selected_pos: Option<usize>)
     let Some(pos) = selected_pos else {
         return;
     };
-
+    if pos >= ui.browser_store.n_items() as usize {
+        return;
+    }
     match ui.browser_stack.visible_child_name().as_deref() {
-        Some("grid") => {
-            if pos < ui.grid_store.n_items() as usize {
-                ui.grid
-                    .scroll_to(pos as u32, gtk::ListScrollFlags::NONE, None);
-            }
-        }
-        _ => {
-            let Some(row) = ui.list.row_at_index(pos as i32) else {
-                return;
-            };
-            let Some(bounds) = row.compute_bounds(&ui.list) else {
-                return;
-            };
-
-            let row_top = f64::from(bounds.y());
-            let row_bottom = row_top + f64::from(bounds.height());
-            let adjustment = ui.list_scroll.vadjustment();
-            let view_top = adjustment.value();
-            let view_bottom = view_top + adjustment.page_size();
-            let min = adjustment.lower();
-            let max = (adjustment.upper() - adjustment.page_size()).max(min);
-
-            if row_top < view_top {
-                adjustment.set_value(row_top.clamp(min, max));
-            } else if row_bottom > view_bottom {
-                adjustment.set_value((row_bottom - adjustment.page_size()).clamp(min, max));
-            }
-        }
+        Some("grid") => ui
+            .grid
+            .scroll_to(pos as u32, gtk::ListScrollFlags::NONE, None),
+        _ => ui
+            .list
+            .scroll_to(pos as u32, gtk::ListScrollFlags::NONE, None),
     }
 }
 
 pub(super) fn show_toast(ui: &Ui, message: &str) {
-    let toast = Toast::builder()
-        .use_markup(false)
-        .timeout(2)
-        .build();
+    let toast = Toast::builder().use_markup(false).timeout(2).build();
     toast.set_title(message);
     ui.toast_overlay.add_toast(toast);
 }

@@ -12,8 +12,8 @@ use adw::{
 };
 use booru_core::{BrowseSort, Library, SearchQuery};
 use gtk::{
-    self, Button, Entry, GridView, Label, LinkButton, ListBox, Picture, ScrolledWindow,
-    SearchEntry, SingleSelection, TextView,
+    self, Button, Entry, GridView, Label, LinkButton, ListView, Picture, SearchEntry,
+    SingleSelection, TextView,
 };
 use rand::seq::SliceRandom;
 
@@ -130,11 +130,10 @@ impl AppState {
 #[derive(Clone)]
 struct Ui {
     window: ApplicationWindow,
-    list: ListBox,
-    list_scroll: ScrolledWindow,
+    list: ListView,
     grid: GridView,
-    grid_store: gtk::gio::ListStore,
-    grid_selection: SingleSelection,
+    browser_store: gtk::gio::ListStore,
+    browser_selection: SingleSelection,
     browser_stack: ViewStack,
     picture: Picture,
     title: Label,
@@ -156,7 +155,8 @@ struct Ui {
     banner: Banner,
     detail_image_seq: Rc<Cell<u64>>,
     detail_pending_request_id: Rc<Cell<Option<u64>>>,
-    grid_loaded_version: Rc<Cell<u64>>,
+    browser_loaded_version: Rc<Cell<u64>>,
+    updating_browser: Rc<Cell<bool>>,
     image_loader: Rc<ImageLoader>,
 }
 
