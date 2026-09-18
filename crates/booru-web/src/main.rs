@@ -11,7 +11,7 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use booru_core::{BooruConfig, Library, SearchQuery, SearchSort};
+use booru_core::{BooruConfig, BrowseSort, Library, SearchQuery};
 use clap::Parser;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -68,6 +68,7 @@ struct IndexParams {
     from: Option<usize>,
     sy: Option<u32>,
     randomize: Option<String>,
+    sort: Option<String>,
     seed: Option<u64>,
 }
 
@@ -93,6 +94,8 @@ struct TagLink {
 #[derive(Template)]
 #[template(path = "index.html")]
 struct IndexTemplate {
+    sort: String,
+    clear_source_href: String,
     query: String,
     source_filter: Option<String>,
     show_sensitive: bool,
@@ -216,14 +219,11 @@ async fn index_handler(
         .as_deref()
         .map(parse_truthy)
         .unwrap_or(state.default_show_sensitive);
-    let randomize = params
-        .randomize
-        .as_deref()
-        .map(parse_truthy)
-        .unwrap_or(true);
+    let sort = resolve_sort(params.sort.as_deref(), params.randomize.as_deref());
+    let randomize = sort.is_random(source_filter.is_some());
     let limit = params.limit.unwrap_or(state.default_limit).clamp(1, 1000);
     let requested_page = params.page.unwrap_or(1).max(1);
-    let seed = if randomize {
+    let seed = if sort == BrowseSort::Random {
         Some(params.seed.unwrap_or_else(generate_seed))
     } else {
         None
@@ -236,14 +236,14 @@ async fn index_handler(
             SearchQuery::new(split_search_terms(&query_trimmed))
                 .with_aliases(use_aliases)
                 .with_source_url(source_filter.clone())
-                .with_sort(SearchSort::FileNameAsc),
+                .with_sort(sort.search_sort(source_filter.is_some())),
         )
         .indices;
 
     if !show_sensitive {
         indices.retain(|idx| !state.library.index.items[*idx].merged_sensitive());
     }
-    if let Some(seed) = seed {
+    if let Some(seed) = seed.filter(|_| randomize) {
         let mut rng = StdRng::seed_from_u64(seed);
         indices.shuffle(&mut rng);
     }
@@ -266,7 +266,7 @@ async fn index_handler(
         query: query_trimmed.clone(),
         source_url: source_filter.clone(),
         show_sensitive,
-        randomize,
+        sort,
         seed,
         limit,
         page,
@@ -285,12 +285,17 @@ async fn index_handler(
         })
         .collect::<Vec<_>>();
 
-    let reshuffle_href = seed.map(|current_seed| {
+    let clear_source_href = build_index_href(&IndexNav {
+        source_url: None,
+        page: 1,
+        ..nav.clone()
+    });
+    let reshuffle_href = seed.filter(|_| randomize).map(|current_seed| {
         build_index_href(&IndexNav {
             query: query_trimmed.clone(),
             source_url: source_filter.clone(),
             show_sensitive,
-            randomize: true,
+            sort,
             seed: Some(next_seed(current_seed)),
             limit,
             page: 1,
@@ -298,10 +303,12 @@ async fn index_handler(
     });
 
     HtmlTemplate(IndexTemplate {
+        clear_source_href,
+        randomize,
         query: query_trimmed,
         source_filter,
         show_sensitive,
-        randomize,
+        sort: sort.as_str().to_string(),
         seed,
         reshuffle_href,
         total_matches,
@@ -339,19 +346,19 @@ async fn item_handler(
         .as_deref()
         .map(parse_truthy)
         .unwrap_or(state.default_show_sensitive);
-    let randomize = params
-        .randomize
-        .as_deref()
-        .map(parse_truthy)
-        .unwrap_or(true);
-    let seed = if randomize { params.seed } else { None };
+    let sort = resolve_sort(params.sort.as_deref(), params.randomize.as_deref());
+    let seed = if sort == BrowseSort::Random {
+        params.seed
+    } else {
+        None
+    };
     let limit = params.limit.unwrap_or(state.default_limit).clamp(1, 1000);
     let page = params.page.unwrap_or(1).max(1);
     let mut back_href = build_index_href(&IndexNav {
         query: query_trimmed,
         source_url: source_filter,
         show_sensitive,
-        randomize,
+        sort,
         seed,
         limit,
         page,
@@ -371,7 +378,7 @@ async fn item_handler(
         query: String::new(),
         source_url: None,
         show_sensitive,
-        randomize,
+        sort,
         seed,
         limit,
         page: 1,
@@ -513,7 +520,7 @@ struct IndexNav {
     query: String,
     source_url: Option<String>,
     show_sensitive: bool,
-    randomize: bool,
+    sort: BrowseSort,
     seed: Option<u64>,
     limit: usize,
     page: usize,
@@ -550,12 +557,8 @@ fn build_index_query_string(nav: &IndexNav) -> String {
     if nav.show_sensitive {
         pairs.push("show_sensitive=1".to_string());
     }
-    if nav.randomize {
-        pairs.push("randomize=1".to_string());
-    } else {
-        pairs.push("randomize=0".to_string());
-    }
-    if nav.randomize {
+    pairs.push(format!("sort={}", nav.sort.as_str()));
+    if nav.sort == BrowseSort::Random {
         if let Some(seed) = nav.seed {
             pairs.push(format!("seed={seed}"));
         }
@@ -582,7 +585,7 @@ fn build_term_search_href(term: &str, nav: &IndexNav) -> String {
         query: term.to_string(),
         source_url: None,
         show_sensitive: nav.show_sensitive,
-        randomize: nav.randomize,
+        sort: nav.sort,
         seed: nav.seed,
         limit: nav.limit,
         page: 1,
@@ -599,8 +602,8 @@ fn build_source_search_href(source: &str, nav: &IndexNav) -> Option<String> {
         query: String::new(),
         source_url: Some(trimmed.to_string()),
         show_sensitive: nav.show_sensitive,
-        randomize: false,
-        seed: None,
+        sort: nav.sort,
+        seed: nav.seed,
         limit: nav.limit,
         page: 1,
     };
@@ -617,4 +620,165 @@ fn generate_seed() -> u64 {
 
 fn next_seed(seed: u64) -> u64 {
     seed.wrapping_mul(6364136223846793005).wrapping_add(1)
+}
+
+fn resolve_sort(sort: Option<&str>, randomize: Option<&str>) -> BrowseSort {
+    sort.and_then(BrowseSort::parse).unwrap_or_else(|| {
+        if randomize.map(parse_truthy).unwrap_or(true) {
+            BrowseSort::Random
+        } else {
+            BrowseSort::FileName
+        }
+    })
+}
+
+#[cfg(test)]
+mod sort_tests {
+    use super::*;
+
+    fn state() -> AppState {
+        let mut index = booru_core::Index::default();
+        for (name, seconds) in [("a.jpg", 1), ("b.jpg", 3), ("c.jpg", 2)] {
+            index.items.push(booru_core::ImageItem {
+                image_path: name.into(), meta_path: Default::default(), booru_path: Default::default(),
+                modified_at: Some(UNIX_EPOCH + std::time::Duration::from_secs(seconds)),
+                created_at: None,
+                original: serde_json::json!({"category": "misc", "url": "https://example.com/post", "tags": ["cat"]}),
+                edits: Default::default(),
+            });
+        }
+        AppState {
+            library: Arc::new(Library {
+                config: BooruConfig::with_roots(vec![]),
+                index,
+                warnings: vec![],
+            }),
+            default_show_sensitive: true,
+            default_limit: 1,
+        }
+    }
+
+    async fn html(params: IndexParams) -> String {
+        let response = index_handler(State(state()), Query(params))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        String::from_utf8(
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn legacy_sort_parameters_and_explicit_precedence() {
+        assert_eq!(resolve_sort(None, None), BrowseSort::Random);
+        assert_eq!(
+            resolve_sort(Some("created-desc"), Some("1")),
+            BrowseSort::CreatedDesc
+        );
+        assert_eq!(
+            resolve_sort(Some("created-asc"), None),
+            BrowseSort::CreatedAsc
+        );
+        assert_eq!(resolve_sort(None, Some("0")), BrowseSort::FileName);
+        assert_eq!(resolve_sort(Some("bad"), Some("0")), BrowseSort::FileName);
+        assert_eq!(
+            resolve_sort(Some("mtime-desc"), Some("1")),
+            BrowseSort::ModifiedDesc
+        );
+        assert_eq!(
+            resolve_sort(Some("mtime-asc"), None),
+            BrowseSort::ModifiedAsc
+        );
+    }
+
+    #[tokio::test]
+    async fn sorts_before_pagination_and_preserves_navigation() {
+        let page = html(IndexParams {
+            sort: Some("mtime-desc".into()),
+            page: Some(2),
+            ..Default::default()
+        })
+        .await;
+        assert!(page.contains("id=\"item-2\""));
+        assert!(!page.contains("id=\"item-1\""));
+        assert!(page.contains("name=\"sort\" value=\"mtime-desc\""));
+        assert!(page.contains("sort=mtime-desc"));
+        assert!(!page.contains("Reshuffle</a>"));
+        let response = item_handler(
+            State(state()),
+            Path(2),
+            Query(IndexParams {
+                sort: Some("mtime-desc".into()),
+                page: Some(2),
+                ..Default::default()
+            }),
+        )
+        .await
+        .into_response();
+        let detail = String::from_utf8(
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(detail.contains("sort=mtime-desc"));
+        assert!(detail.contains("page=2"));
+        let nav = IndexNav {
+            query: String::new(),
+            source_url: None,
+            show_sensitive: true,
+            sort: BrowseSort::ModifiedDesc,
+            seed: None,
+            limit: 1,
+            page: 2,
+        };
+        for href in [
+            build_tag_search_href("cat", &nav),
+            build_author_search_href("artist", &nav).unwrap(),
+            build_source_search_href("https://example.com/post", &nav).unwrap(),
+        ] {
+            assert!(href.contains("sort=mtime-desc"));
+            assert!(href.contains("page=1"));
+        }
+    }
+
+    #[tokio::test]
+    async fn source_order_overrides_preference_but_retains_sort_and_seed() {
+        for sort in ["mtime-desc", "created-desc", "created-asc", "random"] {
+            let page = html(IndexParams {
+                source: Some("https://example.com/post".into()),
+                sort: Some(sort.into()),
+                seed: Some(42),
+                ..Default::default()
+            })
+            .await;
+            assert!(page.contains("id=\"item-0\""));
+            assert!(page.contains("File name order (same source)"));
+            assert!(page.contains(&format!("sort={sort}")));
+            assert!(!page.contains("Reshuffle</a>"));
+            if sort == "random" {
+                assert!(page.contains("seed=42"));
+                assert!(page.contains("name=\"seed\" value=\"42\""));
+            }
+        }
+        let first = html(IndexParams {
+            sort: Some("random".into()),
+            seed: Some(42),
+            ..Default::default()
+        })
+        .await;
+        let again = html(IndexParams {
+            sort: Some("random".into()),
+            seed: Some(42),
+            ..Default::default()
+        })
+        .await;
+        assert_eq!(first, again);
+        assert!(first.contains("Reshuffle</a>"));
+    }
 }

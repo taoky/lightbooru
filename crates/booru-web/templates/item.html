@@ -318,7 +318,7 @@
       function buildQuickSearchHref(text) {
         const current = new URL(window.location.href);
         const target = new URL("/", window.location.origin);
-        ["show_sensitive", "randomize", "seed", "limit", "source"].forEach(function (key) {
+        ["show_sensitive", "sort", "randomize", "seed", "limit", "source"].forEach(function (key) {
           const value = current.searchParams.get(key);
           if (value !== null && value !== "") {
             target.searchParams.set(key, value);

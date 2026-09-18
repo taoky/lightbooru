@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use booru_core::{
-    apply_update_to_image, BooruConfig, EditUpdate, Library, SearchQuery, SearchSort,
+    apply_update_to_image, BooruConfig, BrowseSort, EditUpdate, Library, SearchQuery,
 };
 use clap::Parser;
 use crossterm::event::{
@@ -29,6 +29,10 @@ const TICK_RATE: Duration = Duration::from_millis(150);
 #[derive(Parser)]
 #[command(name = "booru-tui", version, about = "TUI browser for LightBooru")]
 struct Cli {
+    /// Image order (file times are read when scanning)
+    #[arg(long, default_value = "filename", value_parser = ["filename", "mtime-desc", "mtime-asc", "created-desc", "created-asc"])]
+    sort: String,
+
     /// Base directory for gallery-dl downloads (can be repeated)
     #[arg(long, short)]
     base: Vec<PathBuf>,
@@ -102,6 +106,7 @@ impl Preview {
 }
 
 struct App {
+    sort: BrowseSort,
     library: Library,
     show_sensitive: bool,
     show_help: bool,
@@ -126,6 +131,7 @@ struct App {
 impl App {
     fn new(library: Library, show_sensitive: bool) -> Self {
         let mut app = Self {
+            sort: BrowseSort::FileName,
             library,
             show_sensitive,
             show_help: false,
@@ -180,7 +186,7 @@ impl App {
             SearchQuery::new(split_search_terms(&self.search_input))
                 .with_aliases(true)
                 .with_source_url(self.source_filter.clone())
-                .with_sort(SearchSort::FileNameAsc),
+                .with_sort(self.sort.search_sort(self.source_filter.is_some())),
         );
         self.filtered_indices = search
             .indices
@@ -195,6 +201,34 @@ impl App {
             self.selected = self.filtered_indices.len() - 1;
         }
         self.list_offset = self.list_offset.min(self.selected);
+    }
+
+    fn set_sort(&mut self, sort: BrowseSort) {
+        self.sort = sort;
+        self.selected = 0;
+        self.list_offset = 0;
+        self.detail_scroll = 0;
+        self.rebuild_filter();
+    }
+
+    fn cycle_sort(&mut self) {
+        let sort = match self.sort {
+            BrowseSort::FileName | BrowseSort::Random => BrowseSort::ModifiedDesc,
+            BrowseSort::ModifiedDesc => BrowseSort::ModifiedAsc,
+            BrowseSort::ModifiedAsc => BrowseSort::CreatedDesc,
+            BrowseSort::CreatedDesc => BrowseSort::CreatedAsc,
+            BrowseSort::CreatedAsc => BrowseSort::FileName,
+        };
+        self.set_sort(sort);
+        self.status = format!(
+            "Sort: {}{}",
+            sort.label(),
+            if self.source_filter.is_some() {
+                " (same-source filter uses file name)"
+            } else {
+                ""
+            }
+        );
     }
 
     fn selected_item_index(&self) -> Option<usize> {
@@ -575,7 +609,9 @@ fn main() -> Result<()> {
         }
     }
 
-    run_tui(App::new(library, cli.sensitive))
+    let mut app = App::new(library, cli.sensitive);
+    app.set_sort(BrowseSort::parse(&cli.sort).expect("validated sort"));
+    run_tui(app)
 }
 
 fn run_tui(mut app: App) -> Result<()> {
@@ -668,6 +704,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<bool> {
         KeyCode::Char('/') if key.modifiers.contains(KeyModifiers::SHIFT) => app.toggle_help(),
         KeyCode::Char(' ') => app.jump_to_random(),
         KeyCode::Char('b') => app.jump_to_previous_random(),
+        KeyCode::Char('o') => app.cycle_sort(),
         KeyCode::Enter => {
             if let Err(err) = app.open_selected_image() {
                 app.status = err.to_string();
@@ -1175,6 +1212,7 @@ fn render_help_dialog(frame: &mut Frame) {
         "  Space                 Jump to random image",
         "  b                     Jump back from random history",
         "  /                     Search",
+        "  o                     Cycle file name / modified / created order",
         "  t                     Edit tags (+tag / -tag)",
         "  u                     Filter to same source URL",
         "  U                     Clear source URL filter",
@@ -1226,8 +1264,17 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
         FocusPane::Images => "Images",
         FocusPane::Detail => "Detail",
     };
-    let status = Paragraph::new(format!("[{prefix} | Focus:{focus}] {}", app.status))
-        .block(Block::default().borders(Borders::ALL).title("Status"));
+    let status = Paragraph::new(format!(
+        "[{prefix} | Focus:{focus} | Sort: {}{}] {}",
+        app.sort.label(),
+        if app.source_filter.is_some() {
+            " (same-source: file name)"
+        } else {
+            ""
+        },
+        app.status
+    ))
+    .block(Block::default().borders(Borders::ALL).title("Status"));
     frame.render_widget(status, area);
 }
 
@@ -1270,5 +1317,52 @@ mod tests {
             apply_tag_changes(&current, &changes),
             vec!["cat".to_string(), "dog".to_string()]
         );
+    }
+}
+
+#[cfg(test)]
+mod sort_tests {
+    use super::*;
+    fn sort_library() -> Library {
+        let mut index = booru_core::Index::default();
+        for (name, seconds) in [("a.jpg", 1), ("b.jpg", 3), ("c.jpg", 2)] {
+            index.items.push(booru_core::ImageItem {
+                image_path: name.into(), meta_path: Default::default(), booru_path: Default::default(),
+                modified_at: Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds)),
+                created_at: None,
+                original: serde_json::json!({"category": "misc", "url": "https://example.com/post"}),
+                edits: Default::default(),
+            });
+        }
+        Library {
+            config: booru_core::BooruConfig::with_roots(vec![]),
+            index,
+            warnings: vec![],
+        }
+    }
+
+    #[test]
+    fn cycle_sort_and_restore_after_same_source() {
+        let mut app = App::new(sort_library(), true);
+        app.selected = 2;
+        app.cycle_sort();
+        assert_eq!(app.filtered_indices, vec![1, 2, 0]);
+        assert_eq!(app.selected, 0);
+        app.filter_by_selected_source();
+        assert_eq!(app.filtered_indices, vec![0, 1, 2]);
+        app.clear_source_filter();
+        assert_eq!(app.filtered_indices, vec![1, 2, 0]);
+        app.cycle_sort();
+        assert_eq!(app.filtered_indices, vec![0, 2, 1]);
+        app.cycle_sort();
+        assert_eq!(app.sort, BrowseSort::CreatedDesc);
+        app.cycle_sort();
+        assert_eq!(app.sort, BrowseSort::CreatedAsc);
+        app.cycle_sort();
+        assert_eq!(app.sort, BrowseSort::FileName);
+        assert_eq!(app.filtered_indices, vec![0, 1, 2]);
+        app.library.index.items.clear();
+        app.cycle_sort();
+        assert!(app.selected_item_index().is_none());
     }
 }

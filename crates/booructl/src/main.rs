@@ -10,6 +10,7 @@ use booru_core::{
     load_alias_groups_from_root, merge_alias_terms, metadata_path_for_image,
     normalize_search_terms, remove_alias_terms, resolve_image_path, save_alias_groups_to_root,
     BooruConfig, EditUpdate, FuzzyHashAlgorithm, HashCache, Library, ProgressObserver, SearchQuery,
+    SearchSort,
 };
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
@@ -72,6 +73,9 @@ enum Commands {
     },
     /// Search images by substring in tags/author/detail
     Search {
+        /// Result order (times refer to the image file)
+        #[arg(long, default_value = "path", value_parser = ["path", "filename", "mtime-desc", "mtime-asc", "created-desc", "created-asc"])]
+        sort: String,
         terms: Vec<String>,
         #[arg(long, default_value_t = 100)]
         limit: usize,
@@ -155,7 +159,9 @@ fn main() -> Result<()> {
             clear_tags,
             notes,
         ),
-        Commands::Search { terms, limit } => search_command(&config, terms, limit, cli.quiet),
+        Commands::Search { terms, limit, sort } => {
+            search_command(&config, terms, limit, &sort, cli.quiet)
+        }
         Commands::Alias { command } => alias_command(&config, command, cli.quiet),
         Commands::Dupes {
             algo,
@@ -474,10 +480,19 @@ fn search_command(
     config: &BooruConfig,
     terms: Vec<String>,
     limit: usize,
+    sort: &str,
     quiet: bool,
 ) -> Result<()> {
     let library = scan_library(config, quiet)?;
-    let search = library.search(SearchQuery::new(terms).with_aliases(true));
+    let sort = match sort {
+        "mtime-desc" => SearchSort::ModifiedTimeDesc,
+        "mtime-asc" => SearchSort::ModifiedTimeAsc,
+        "created-desc" => SearchSort::CreatedTimeDesc,
+        "created-asc" => SearchSort::CreatedTimeAsc,
+        "filename" => SearchSort::FileNameAsc,
+        _ => SearchSort::FilePathAsc,
+    };
+    let search = library.search(SearchQuery::new(terms).with_aliases(true).with_sort(sort));
 
     if search.normalized_terms.is_empty() {
         return Err(anyhow!("no search terms provided"));
@@ -488,12 +503,11 @@ fn search_command(
         }
     }
 
-    let mut results = search
+    let results = search
         .indices
         .iter()
         .filter_map(|idx| library.index.items.get(*idx))
         .collect::<Vec<_>>();
-    results.sort_by_key(|item| item.image_path.clone());
     for item in results.into_iter().take(limit) {
         println!("{}", item.image_path.display());
     }
@@ -808,6 +822,8 @@ mod tests {
 
     fn make_item(original: serde_json::Value) -> booru_core::ImageItem {
         booru_core::ImageItem {
+            modified_at: None,
+            created_at: None,
             image_path: PathBuf::new(),
             meta_path: PathBuf::new(),
             booru_path: PathBuf::new(),

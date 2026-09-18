@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde_json::Value;
 use walkdir::WalkDir;
@@ -19,6 +20,9 @@ use crate::path::{booru_path_for_image, metadata_path_for_image, resolve_image_p
 
 #[derive(Clone, Debug)]
 pub struct ImageItem {
+    pub modified_at: Option<SystemTime>,
+    /// File-system birth time, if supported; not inode change time.
+    pub created_at: Option<SystemTime>,
     pub image_path: PathBuf,
     pub meta_path: PathBuf,
     pub booru_path: PathBuf,
@@ -509,6 +513,11 @@ pub enum SearchSort {
     #[default]
     IndexOrder,
     FileNameAsc,
+    FilePathAsc,
+    ModifiedTimeAsc,
+    ModifiedTimeDesc,
+    CreatedTimeAsc,
+    CreatedTimeDesc,
 }
 
 impl SearchQuery {
@@ -587,24 +596,55 @@ impl Library {
             })
             .collect::<Vec<_>>();
 
-        if query.sort == SearchSort::FileNameAsc {
+        if query.sort != SearchSort::IndexOrder {
             indices.sort_by(|lhs, rhs| {
-                let left_item = &self.index.items[*lhs];
-                let right_item = &self.index.items[*rhs];
-                let left_name = left_item
-                    .image_path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("");
-                let right_name = right_item
-                    .image_path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("");
-
-                left_name
-                    .cmp(right_name)
-                    .then_with(|| left_item.image_path.cmp(&right_item.image_path))
+                let left = &self.index.items[*lhs];
+                let right = &self.index.items[*rhs];
+                let by_name = || {
+                    left.image_path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("")
+                        .cmp(
+                            right
+                                .image_path
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or(""),
+                        )
+                        .then_with(|| left.image_path.cmp(&right.image_path))
+                };
+                match query.sort {
+                    SearchSort::FilePathAsc => left.image_path.cmp(&right.image_path),
+                    SearchSort::ModifiedTimeAsc
+                    | SearchSort::ModifiedTimeDesc
+                    | SearchSort::CreatedTimeAsc
+                    | SearchSort::CreatedTimeDesc => {
+                        let (left_time, right_time) = match query.sort {
+                            SearchSort::CreatedTimeAsc | SearchSort::CreatedTimeDesc => {
+                                (left.created_at, right.created_at)
+                            }
+                            _ => (left.modified_at, right.modified_at),
+                        };
+                        match (left_time, right_time) {
+                            (Some(a), Some(b)) => {
+                                let order = if matches!(
+                                    query.sort,
+                                    SearchSort::ModifiedTimeDesc | SearchSort::CreatedTimeDesc
+                                ) {
+                                    b.cmp(&a)
+                                } else {
+                                    a.cmp(&b)
+                                };
+                                order.then_with(by_name)
+                            }
+                            (Some(_), None) => std::cmp::Ordering::Less,
+                            (None, Some(_)) => std::cmp::Ordering::Greater,
+                            (None, None) => by_name(),
+                        }
+                    }
+                    _ => by_name(),
+                }
             });
         }
 
@@ -720,7 +760,21 @@ pub fn scan_roots(roots: &[PathBuf]) -> Result<ScanReport, BooruError> {
             let meta_path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
             let booru_path = fs::canonicalize(&booru_path).unwrap_or(booru_path);
 
+            let metadata = fs::metadata(&image_path);
+            let created_at = metadata.as_ref().ok().and_then(|meta| meta.created().ok());
+            let modified_at = match metadata.and_then(|meta| meta.modified()) {
+                Ok(time) => Some(time),
+                Err(err) => {
+                    warnings.push(ScanWarning {
+                        path: image_path.clone(),
+                        message: format!("failed to read image modification time: {err}"),
+                    });
+                    None
+                }
+            };
             let item = ImageItem {
+                modified_at,
+                created_at,
                 image_path: image_path.clone(),
                 meta_path,
                 booru_path,
@@ -747,7 +801,10 @@ pub fn load_item_for_image(image_path: &Path) -> Result<ImageItem, BooruError> {
         None => BooruEdits::default(),
     };
 
+    let metadata = fs::metadata(image_path).ok();
     Ok(ImageItem {
+        modified_at: metadata.as_ref().and_then(|meta| meta.modified().ok()),
+        created_at: metadata.as_ref().and_then(|meta| meta.created().ok()),
         image_path: image_path.to_path_buf(),
         meta_path,
         booru_path,
@@ -780,6 +837,8 @@ mod tests {
 
     fn make_item(original: serde_json::Value) -> ImageItem {
         ImageItem {
+            modified_at: None,
+            created_at: None,
             image_path: PathBuf::new(),
             meta_path: PathBuf::new(),
             booru_path: PathBuf::new(),
@@ -790,6 +849,8 @@ mod tests {
 
     fn make_item_with_path(path: &str, original: serde_json::Value) -> ImageItem {
         ImageItem {
+            modified_at: None,
+            created_at: None,
             image_path: PathBuf::from(path),
             meta_path: PathBuf::new(),
             booru_path: PathBuf::new(),
@@ -1083,6 +1144,87 @@ mod tests {
             SearchQuery::new(Vec::new()).with_source_url(Some("https://example.com/b".to_string())),
         );
         assert_eq!(result.indices, vec![1]);
+    }
+
+    #[test]
+    fn file_time_sorts_are_stable_and_unknown_times_are_last() {
+        use std::time::Duration;
+        let mut index = Index::default();
+        for (path, nanos) in [
+            ("/z/a.jpg", Some(2)),
+            ("/b.jpg", None),
+            ("/a/a.jpg", Some(2)),
+            ("/old.jpg", Some(1)),
+            ("/new.jpg", Some(3)),
+            ("/a.jpg", None),
+        ] {
+            let mut item = make_item_with_path(path, json!({"tags": ["cat"]}));
+            item.modified_at = nanos.map(|n| UNIX_EPOCH + Duration::from_nanos(n));
+            item.created_at = nanos.map(|n| UNIX_EPOCH + Duration::from_nanos(4 - n));
+            index.items.push(item);
+        }
+        let library = Library {
+            config: BooruConfig::with_roots(vec![]),
+            index,
+            warnings: vec![],
+        };
+        for (sort, expected) in [
+            (SearchSort::ModifiedTimeAsc, vec![3, 2, 0, 4, 5, 1]),
+            (SearchSort::ModifiedTimeDesc, vec![4, 2, 0, 3, 5, 1]),
+            (SearchSort::CreatedTimeAsc, vec![4, 2, 0, 3, 5, 1]),
+            (SearchSort::CreatedTimeDesc, vec![3, 2, 0, 4, 5, 1]),
+        ] {
+            assert_eq!(
+                library
+                    .search(SearchQuery::new(vec!["cat".into()]).with_sort(sort))
+                    .indices,
+                expected
+            );
+            assert!(library
+                .search(SearchQuery::new(vec!["dog".into()]).with_sort(sort))
+                .indices
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn scan_reads_image_mtime_and_rescan_refreshes_it() {
+        use std::fs::{File, FileTimes};
+        use std::time::Duration;
+        let root = std::env::temp_dir().join(format!(
+            "lightbooru-mtime-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let image = root.join("a.jpg");
+        let file = File::create(&image).unwrap();
+        std::fs::write(root.join("a.jpg.json"), r#"{"date":"2099-01-01"}"#).unwrap();
+        let old = UNIX_EPOCH + Duration::from_secs(1000);
+        file.set_times(FileTimes::new().set_modified(old)).unwrap();
+        let first = scan_roots(&[root.clone()]).unwrap();
+        assert_eq!(first.index.items[0].modified_at, Some(old));
+        let created_at = std::fs::metadata(&image).unwrap().created().ok();
+        assert_eq!(first.index.items[0].created_at, created_at);
+        assert_eq!(
+            super::load_item_for_image(&image).unwrap().created_at,
+            created_at
+        );
+        assert_eq!(
+            super::load_item_for_image(&image).unwrap().modified_at,
+            Some(old)
+        );
+        let new = old + Duration::from_secs(10);
+        file.set_times(FileTimes::new().set_modified(new)).unwrap();
+        assert_eq!(
+            scan_roots(&[root.clone()]).unwrap().index.items[0].modified_at,
+            Some(new)
+        );
+        assert_eq!(first.index.items[0].modified_at, Some(old));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

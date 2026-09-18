@@ -38,6 +38,11 @@ pub(super) fn install_tag_editor_css() {
 }
 
 pub(super) fn rebuild_view(state: &Rc<RefCell<AppState>>, ui: &Ui) {
+    if let Some(action) = ui.window.lookup_action("reshuffle") {
+        if let Ok(action) = action.downcast::<gtk::gio::SimpleAction>() {
+            action.set_enabled(state.borrow().random_sort_active());
+        }
+    }
     let browser_mode = state.borrow().browser_mode;
     ui.browser_stack
         .set_visible_child_name(browser_mode.as_name());
@@ -71,11 +76,13 @@ fn refresh_list(state: &Rc<RefCell<AppState>>, ui: &Ui) {
     };
 
     for (title, subtitle) in rows {
-        let row = ActionRow::builder()
-            .title(title)
-            .subtitle(subtitle)
-            .activatable(true)
-            .build();
+        let row = ActionRow::new();
+        // Construction freezes notifications, delaying the internal labels' markup binding.
+        // Disable markup after construction, before passing any metadata to the labels.
+        row.set_use_markup(false);
+        row.set_title(&title);
+        row.set_subtitle(&subtitle);
+        row.set_activatable(true);
         ui.list.append(&row);
     }
 
@@ -563,8 +570,11 @@ pub(super) fn ensure_selected_item_visible(ui: &Ui, selected_pos: Option<usize>)
 }
 
 pub(super) fn show_toast(ui: &Ui, message: &str) {
-    let toast = Toast::new(message);
-    toast.set_timeout(2);
+    let toast = Toast::builder()
+        .use_markup(false)
+        .timeout(2)
+        .build();
+    toast.set_title(message);
     ui.toast_overlay.add_toast(toast);
 }
 

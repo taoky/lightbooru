@@ -424,7 +424,39 @@ Button tags_add_button {
 
 menu main_menu {
   item ("Show sensitive", "win.show-sensitive")
-  item ("Random sort", "win.random-sort")
+  submenu {
+    label: "Sort";
+    item {
+      label: "Random";
+      action: "win.sort";
+      target: "random";
+    }
+    item {
+      label: "File name";
+      action: "win.sort";
+      target: "filename";
+    }
+    item {
+      label: "Modified: newest first";
+      action: "win.sort";
+      target: "mtime-desc";
+    }
+    item {
+      label: "Modified: oldest first";
+      action: "win.sort";
+      target: "mtime-asc";
+    }
+    item {
+      label: "Created: newest first";
+      action: "win.sort";
+      target: "created-desc";
+    }
+    item {
+      label: "Created: oldest first";
+      action: "win.sort";
+      target: "created-asc";
+    }
+  }
   item ("Reshuffle", "win.reshuffle")
   item ("Rescan library", "win.rescan")
 }

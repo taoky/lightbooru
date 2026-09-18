@@ -30,3 +30,6 @@ pub use scan::{
     item_matches_search_terms, scan_roots, ImageItem, Index, Library, ScanReport, ScanWarning,
     SearchQuery, SearchResult, SearchSort,
 };
+
+mod sort;
+pub use sort::BrowseSort;

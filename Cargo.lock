@@ -438,6 +438,7 @@ dependencies = [
  "gtk4",
  "libadwaita",
  "rand 0.8.5",
+ "serde_json",
  "tracing",
  "tracing-subscriber",
 ]
@@ -454,6 +455,7 @@ dependencies = [
  "rand 0.8.5",
  "ratatui",
  "ratatui-image",
+ "serde_json",
 ]
 
 [[package]]

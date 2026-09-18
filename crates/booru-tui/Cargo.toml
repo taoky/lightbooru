@@ -13,3 +13,6 @@ ratatui-image.workspace = true
 image.workspace = true
 rand.workspace = true
 booru-core = { path = "../booru-core" }
+
+[dev-dependencies]
+serde_json.workspace = true

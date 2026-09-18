@@ -344,7 +344,7 @@
         {% endif %}
         {% match source_filter %}
           {% when Some with (source) %}
-            · Source filter <code>{{ source }}</code> · <a href="/">Clear</a>
+            · Source filter <code>{{ source }}</code> · File name order (same source) · <a href="{{ clear_source_href }}">Clear</a>
           {% when None %}
         {% endmatch %}
       </p>
@@ -362,12 +362,16 @@
         </label>
         <label class="toggle">
           Sort
-          <select name="randomize" aria-label="Sort mode">
-            <option value="1" {% if randomize %}selected{% endif %}>Random</option>
-            <option value="0" {% if !randomize %}selected{% endif %}>Original</option>
+          <select name="sort" aria-label="Sort mode">
+            <option value="random" {% if sort == "random" %}selected{% endif %}>Random</option>
+            <option value="filename" {% if sort == "filename" %}selected{% endif %}>File name</option>
+            <option value="mtime-desc" {% if sort == "mtime-desc" %}selected{% endif %}>Modified: newest first</option>
+            <option value="mtime-asc" {% if sort == "mtime-asc" %}selected{% endif %}>Modified: oldest first</option>
+            <option value="created-desc" {% if sort == "created-desc" %}selected{% endif %}>Created: newest first</option>
+            <option value="created-asc" {% if sort == "created-asc" %}selected{% endif %}>Created: oldest first</option>
           </select>
         </label>
-        {% if randomize %}
+        {% if sort == "random" %}
           {% match seed %}
             {% when Some with (s) %}
               <input type="hidden" name="seed" value="{{ s }}">
@@ -429,12 +433,8 @@
                   {% when None %}
                 {% endmatch %}
                 {% if show_sensitive %}<input type="hidden" name="show_sensitive" value="1">{% endif %}
-                {% if randomize %}
-                  <input type="hidden" name="randomize" value="1">
-                  {% match seed %}{% when Some with (s) %}<input type="hidden" name="seed" value="{{ s }}">{% when None %}{% endmatch %}
-                {% else %}
-                  <input type="hidden" name="randomize" value="0">
-                {% endif %}
+                <input type="hidden" name="sort" value="{{ sort }}">
+                {% match seed %}{% when Some with (s) %}<input type="hidden" name="seed" value="{{ s }}">{% when None %}{% endmatch %}
                 <button type="submit">Prev</button>
               </form>
             {% when None %}
@@ -452,12 +452,8 @@
                   {% when None %}
                 {% endmatch %}
                 {% if show_sensitive %}<input type="hidden" name="show_sensitive" value="1">{% endif %}
-                {% if randomize %}
-                  <input type="hidden" name="randomize" value="1">
-                  {% match seed %}{% when Some with (s) %}<input type="hidden" name="seed" value="{{ s }}">{% when None %}{% endmatch %}
-                {% else %}
-                  <input type="hidden" name="randomize" value="0">
-                {% endif %}
+                <input type="hidden" name="sort" value="{{ sort }}">
+                {% match seed %}{% when Some with (s) %}<input type="hidden" name="seed" value="{{ s }}">{% when None %}{% endmatch %}
                 <button type="submit">Next</button>
               </form>
             {% when None %}
@@ -472,12 +468,8 @@
               {% when None %}
             {% endmatch %}
             {% if show_sensitive %}<input type="hidden" name="show_sensitive" value="1">{% endif %}
-            {% if randomize %}
-              <input type="hidden" name="randomize" value="1">
-              {% match seed %}{% when Some with (s) %}<input type="hidden" name="seed" value="{{ s }}">{% when None %}{% endmatch %}
-            {% else %}
-              <input type="hidden" name="randomize" value="0">
-            {% endif %}
+            <input type="hidden" name="sort" value="{{ sort }}">
+            {% match seed %}{% when Some with (s) %}<input type="hidden" name="seed" value="{{ s }}">{% when None %}{% endmatch %}
             <label class="toggle">Page <input type="number" name="page" min="1" max="{{ total_pages }}" value="{{ page }}"></label>
             <button type="submit">Go</button>
           </form>
@@ -524,7 +516,7 @@
       function buildQuickSearchHref(text) {
         const current = new URL(window.location.href);
         const target = new URL("/", window.location.origin);
-        ["show_sensitive", "randomize", "seed", "limit", "source"].forEach(function (key) {
+        ["show_sensitive", "sort", "randomize", "seed", "limit", "source"].forEach(function (key) {
           const value = current.searchParams.get(key);
           if (value !== null && value !== "") {
             target.searchParams.set(key, value);

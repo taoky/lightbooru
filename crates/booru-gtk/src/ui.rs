@@ -10,7 +10,7 @@ use adw::{
     ApplicationWindow, Banner, BottomSheet, NavigationSplitView, ToastOverlay, ToggleGroup,
     ViewStack, WrapBox,
 };
-use booru_core::{Library, SearchQuery, SearchSort};
+use booru_core::{BrowseSort, Library, SearchQuery};
 use gtk::{
     self, Button, Entry, GridView, Label, LinkButton, ListBox, Picture, ScrolledWindow,
     SearchEntry, SingleSelection, TextView,
@@ -58,7 +58,7 @@ pub(crate) struct AppState {
     filter_version: u64,
     browser_mode: BrowserMode,
     show_sensitive: bool,
-    random_sort: bool,
+    sort: BrowseSort,
     query: String,
     quiet: bool,
 }
@@ -72,7 +72,7 @@ impl AppState {
             filter_version: 0,
             browser_mode: BrowserMode::Grid,
             show_sensitive,
-            random_sort: true,
+            sort: BrowseSort::Random,
             query: String::new(),
             quiet,
         };
@@ -88,7 +88,7 @@ impl AppState {
             SearchQuery::new(terms)
                 .with_aliases(use_aliases)
                 .with_source_url(source_url)
-                .with_sort(SearchSort::FileNameAsc),
+                .with_sort(self.sort.search_sort(has_source_url_filter)),
         );
 
         self.filtered_indices = result
@@ -96,7 +96,7 @@ impl AppState {
             .into_iter()
             .filter(|idx| self.show_sensitive || !self.library.index.items[*idx].merged_sensitive())
             .collect();
-        if self.random_sort && !has_source_url_filter {
+        if self.sort.is_random(has_source_url_filter) {
             let mut rng = rand::thread_rng();
             self.filtered_indices.shuffle(&mut rng);
         }
@@ -107,6 +107,17 @@ impl AppState {
             (None, false) => Some(0),
         };
         self.filter_version = self.filter_version.wrapping_add(1);
+    }
+
+    fn random_sort_active(&self) -> bool {
+        self.sort
+            .is_random(split_search_terms_and_source_url(&self.query).1.is_some())
+    }
+
+    fn set_sort(&mut self, sort: BrowseSort) {
+        self.sort = sort;
+        self.selected_pos = None;
+        self.rebuild_filter();
     }
 
     fn selected_item_index(&self) -> Option<usize> {
@@ -189,4 +200,83 @@ fn split_search_terms_and_source_url(input: &str) -> (Vec<String>, Option<String
     }
 
     (terms, source_url)
+}
+
+#[cfg(test)]
+mod sort_tests {
+    use super::*;
+    fn sort_library() -> Library {
+        let mut index = booru_core::Index::default();
+        for (name, seconds) in [("a.jpg", 1), ("b.jpg", 3), ("c.jpg", 2)] {
+            index.items.push(booru_core::ImageItem {
+                image_path: name.into(), meta_path: Default::default(), booru_path: Default::default(),
+                modified_at: Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds)),
+                created_at: None,
+                original: serde_json::json!({"category": "misc", "url": "https://example.com/post"}),
+                edits: Default::default(),
+            });
+        }
+        Library {
+            config: booru_core::BooruConfig::with_roots(vec![]),
+            index,
+            warnings: vec![],
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a display; run under xvfb-run"]
+    fn sort_menu_actions_update_view_and_reshuffle_state() {
+        use adw::prelude::*;
+        adw::init().unwrap();
+        let app = adw::Application::builder()
+            .application_id("moe.taoky.lightbooru.sort-test")
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let state = Rc::new(RefCell::new(AppState::new(sort_library(), true, true)));
+        build_ui(&app, state.clone());
+        let window = app
+            .active_window()
+            .unwrap()
+            .downcast::<adw::ApplicationWindow>()
+            .unwrap();
+        let sort = window.lookup_action("sort").unwrap();
+        let reshuffle = window.lookup_action("reshuffle").unwrap();
+        assert!(reshuffle.is_enabled());
+        sort.activate(Some(&"mtime-desc".to_variant()));
+        assert_eq!(state.borrow().filtered_indices, vec![1, 2, 0]);
+        assert_eq!(sort.state().unwrap().str(), Some("mtime-desc"));
+        assert!(!reshuffle.is_enabled());
+        state.borrow_mut().query = "https://example.com/post".into();
+        sort.activate(Some(&"random".to_variant()));
+        assert_eq!(state.borrow().filtered_indices, vec![0, 1, 2]);
+        assert!(!reshuffle.is_enabled());
+        state.borrow_mut().query.clear();
+        sort.activate(Some(&"random".to_variant()));
+        assert!(reshuffle.is_enabled());
+        sort.activate(Some(&"mtime-asc".to_variant()));
+        assert_eq!(state.borrow().filtered_indices, vec![0, 2, 1]);
+        window.close();
+    }
+
+    #[test]
+    fn sort_selection_survives_source_filter_and_rescan() {
+        let mut state = AppState::new(sort_library(), true, true);
+        state.set_sort(BrowseSort::ModifiedDesc);
+        assert_eq!(state.filtered_indices, vec![1, 2, 0]);
+        assert_eq!(state.selected_pos, Some(0));
+        state.query = "https://example.com/post".into();
+        state.rebuild_filter();
+        assert_eq!(state.filtered_indices, vec![0, 1, 2]);
+        assert!(!state.random_sort_active());
+        state.query.clear();
+        state.library = sort_library();
+        state.rebuild_filter();
+        assert_eq!(state.filtered_indices, vec![1, 2, 0]);
+        state.set_sort(BrowseSort::ModifiedAsc);
+        assert_eq!(state.filtered_indices, vec![0, 2, 1]);
+        state.library.index.items.clear();
+        state.set_sort(BrowseSort::ModifiedDesc);
+        assert_eq!(state.selected_pos, None);
+    }
 }
